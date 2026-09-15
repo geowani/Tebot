@@ -56,7 +56,6 @@ def guardar_indice(datos):
         json.dump(datos, f, indent=4)
 
 def extraer_categorias(message):
-    # Añadido soporte para GIFs explícitamente en documentos o animaciones
     if not (message.photo or message.video or message.document):
         return []
 
@@ -122,10 +121,13 @@ async def main():
         query = data["query"]
         origen = data.get("origen", "menu")
         
+        # Selección de lista según el filtro activo
         if filter_type == "photos":
             current_list = data["photos"]
         elif filter_type == "videos":
             current_list = data["videos"]
+        elif filter_type == "gifs":
+            current_list = data["gifs"]
         else:
             current_list = data["all_ids"]
             
@@ -134,14 +136,13 @@ async def main():
         current_ids = current_list[start:end]
         
         if not current_ids:
-            # 🟢 NUEVO: Si no se encuentra nada o está vacía, mostramos opción de borrar del índice
             botones_vacio = [
-                [Button.inline(f"🗑️ Eliminar '{query}' del índice", data=f"del_cat_{query}".encode())],
+                [Button.inline(f"🗑️ Eliminar '{query}' del índice y canal", data=f"del_cat_{query}".encode())],
                 [Button.inline("⬅️ Volver al menú", data="volver_menu".encode())]
             ]
             await bot.send_message(
                 chat_id, 
-                f"❌ No hay archivos para este filtro en '{query}'.\nPuedes eliminar esta categoría del índice aquí:", 
+                f"❌ No hay archivos para este filtro en '{query}'.\nPuedes eliminar esta categoría por completo aquí:", 
                 buttons=botones_vacio
             )
             return
@@ -167,6 +168,9 @@ async def main():
             filtros_row.append(Button.inline(f"🖼️ Fotos ({len(data['photos'])})", data=b"filter_photos"))
         if filter_type != "videos" and len(data["videos"]) > 0:
             filtros_row.append(Button.inline(f"🎥 Videos ({len(data['videos'])})", data=b"filter_videos"))
+        if filter_type != "gifs" and len(data["gifs"]) > 0:
+            filtros_row.append(Button.inline(f"🎞️ GIFs ({len(data['gifs'])})", data=b"filter_gifs"))
+            
         if filtros_row:
             botones.append(filtros_row)
 
@@ -218,16 +222,14 @@ async def main():
         texto_lower = texto.lower()
         chat_id = event.chat_id
 
-        # Comprobar si el usuario está escribiendo una ruta manual para mover un archivo
         if chat_id in waiting_manual_move and waiting_manual_move[chat_id]:
             msg_id = waiting_manual_move[chat_id]
-            waiting_manual_move[chat_id] = None # Limpiar estado
+            waiting_manual_move[chat_id] = None 
             destino = texto.lower().replace('#', '').strip()
 
             message = await user.get_messages(CHANNEL_ID, ids=msg_id)
             if message:
                 texto_actual = message.text or ""
-                # Si estaba en sin_nombre, limpiamos o asignamos la nueva etiqueta
                 if f"#{destino}" not in texto_actual.lower():
                     nuevo_texto = f"{texto_actual}\n#{destino}".strip()
                 else:
@@ -235,11 +237,10 @@ async def main():
 
                 try:
                     await user.edit_message(CHANNEL_ID, msg_id, text=nuevo_texto)
-                    # Actualizar índice localmente si aplica
                     indice = cargar_indice()
                     indice[destino] = indice.get(destino, 0) + 1
                     guardar_indice(indice)
-                    await event.reply(f"✅ **¡Archivo movido manualmente con éxito!** Se le asignó `#{destino}` (ID: `{msg_id}`). Ya no aparecerá como sin nombre.")
+                    await event.reply(f"✅ **¡Archivo movido manualmente con éxito!** Se le asignó `#{destino}` (ID: `{msg_id}`).")
                 except Exception as e:
                     await event.reply(f"❌ Error al actualizar el mensaje: {str(e)}")
             else:
@@ -250,7 +251,6 @@ async def main():
             await event.reply("¡Hola! Envíame cualquier palabra o usa /index para navegar.")
             return
 
-        # Comando para eliminar una carpeta completa del índice manual
         if texto_lower.startswith('/eliminar_carpeta'):
             partes = texto.split()
             if len(partes) < 2:
@@ -258,13 +258,24 @@ async def main():
                 return
             
             carpeta_a_borrar = partes[1].lower().replace('#', '')
+            status_del = await event.reply(f"🗑️ Eliminando `#{carpeta_a_borrar}` del índice y del canal...")
+            
             indice = cargar_indice()
             if carpeta_a_borrar in indice:
                 del indice[carpeta_a_borrar]
                 guardar_indice(indice)
-                await event.reply(f"🗑️ La categoría `#{carpeta_a_borrar}` ha sido eliminada del índice exitosamente.")
-            else:
-                await event.reply(f"❌ La categoría `#{carpeta_a_borrar}` no existe en el índice.")
+
+            contador_borrados = 0
+            try:
+                async for message in user.iter_messages(CHANNEL_ID, search=carpeta_a_borrar, limit=300):
+                    if message.photo or message.video or message.document:
+                        await user.delete_messages(CHANNEL_ID, [message.id])
+                        contador_borrados += 1
+                        await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.error(f"Error borrando archivos del canal por comando: {e}")
+
+            await status_del.edit(f"✅ Categoría `#{carpeta_a_borrar}` borrada del índice. Se eliminaron **{contador_borrados}** archivos del canal.")
             return
             
         if texto_lower == '/crear_indice':
@@ -377,7 +388,7 @@ async def main():
 
         query = event.raw_text
         status_msg = await event.reply(f"🔍 Buscando '{query}'...")
-        all_ids, photos, videos = [], [], []
+        all_ids, photos, videos, gifs = [], [], [], []
 
         async for message in user.iter_messages(CHANNEL_ID, search=query, limit=200):
             if message.photo or message.video or message.document:
@@ -386,15 +397,26 @@ async def main():
                     photos.append(message.id)
                 elif message.video:
                     videos.append(message.id)
+                elif message.document:
+                    # Detectar si es un GIF por extensión o atributos del archivo
+                    is_gif = False
+                    if message.file and message.file.name and message.file.name.lower().endswith('.gif'):
+                        is_gif = True
+                    elif message.file and message.file.mime_type == 'image/gif':
+                        is_gif = True
+                    elif 'gif' in extraer_categorias(message):
+                        is_gif = True
+                        
+                    if is_gif:
+                        gifs.append(message.id)
 
         if not all_ids:
-            # 🟢 NUEVO: Si no se encuentra nada con texto directo, también damos opción de borrar si existía en el índice
             query_limpia = query.lower().replace('#', '').strip()
             indice = cargar_indice()
             
             botones_vacio = [Button.inline("⬅️ Volver al menú", data="volver_menu".encode())]
             if query_limpia in indice:
-                botones_vacio.insert(0, Button.inline(f"🗑️ Eliminar '{query_limpia}' del índice", data=f"del_cat_{query_limpia}".encode()))
+                botones_vacio.insert(0, Button.inline(f"🗑️ Eliminar '{query_limpia}' del índice y canal", data=f"del_cat_{query_limpia}".encode()))
 
             await status_msg.edit(f"No se encontraron archivos para '{query}'.", buttons=botones_vacio)
             return
@@ -403,6 +425,7 @@ async def main():
             "all_ids": all_ids,
             "photos": photos,
             "videos": videos,
+            "gifs": gifs,
             "page": 0,
             "filter": "all",
             "query": query,
@@ -466,7 +489,6 @@ async def main():
         data = event.data.decode('utf-8')
         chat_id = event.chat_id
 
-        # 🟢 NUEVO: Manejador del botón para eliminar del índice cuando sale vacío
         if data.startswith("del_cat_"):
             cat_a_borrar = data.replace("del_cat_", "").lower().strip()
             indice = cargar_indice()
@@ -474,10 +496,19 @@ async def main():
             if cat_a_borrar in indice:
                 del indice[cat_a_borrar]
                 guardar_indice(indice)
-                await event.edit(f"🗑️ La categoría `#{cat_a_borrar}` ha sido eliminada del índice correctamente y ya no aparecerá en el menú.")
-            else:
-                await event.answer(f"La categoría '{cat_a_borrar}' ya no estaba en el índice.", alert=True)
-                await event.delete()
+
+            await event.edit(f"🗑️ Eliminando `#{cat_a_borrar}` del índice y buscando archivos en el canal para borrarlos...")
+            contador_borrados = 0
+            try:
+                async for message in user.iter_messages(CHANNEL_ID, search=cat_a_borrar, limit=300):
+                    if message.photo or message.video or message.document:
+                        await user.delete_messages(CHANNEL_ID, [message.id])
+                        contador_borrados += 1
+                        await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.error(f"Error al borrar archivos del canal: {e}")
+
+            await event.edit(f"🗑️ Categoría `#{cat_a_borrar}` eliminada del índice.\n🔥 Se borraron **{contador_borrados}** archivos del canal exitosamente.")
             return
 
         if data == "next_page":
@@ -520,7 +551,7 @@ async def main():
             await event.delete()
 
             status_msg = await bot.send_message(chat_id, f"🔍 Cargando '{query}'...")
-            all_ids, photos, videos = [], [], []
+            all_ids, photos, videos, gifs = [], [], [], []
 
             if query == "sin_nombre":
                 async for message in user.iter_messages(CHANNEL_ID, limit=5000):
@@ -528,24 +559,43 @@ async def main():
                         all_ids.append(message.id)
                         if message.photo: photos.append(message.id)
                         elif message.video: videos.append(message.id)
+                        elif message.document:
+                            is_gif = False
+                            if message.file and message.file.name and message.file.name.lower().endswith('.gif'):
+                                is_gif = True
+                            elif message.file and message.file.mime_type == 'image/gif':
+                                is_gif = True
+                            if is_gif: gifs.append(message.id)
+                            
                         if len(all_ids) >= 200: break
                 display_query = "Sin nombre"
             else:
                 async for message in user.iter_messages(CHANNEL_ID, search=query, limit=200):
                     if message.photo or message.video or message.document:
                         all_ids.append(message.id)
-                        if message.photo: photos.append(message.id)
-                        elif message.video: videos.append(message.id)
+                        if message.photo: 
+                            photos.append(message.id)
+                        elif message.video: 
+                            videos.append(message.id)
+                        elif message.document:
+                            is_gif = False
+                            if message.file and message.file.name and message.file.name.lower().endswith('.gif'):
+                                is_gif = True
+                            elif message.file and message.file.mime_type == 'image/gif':
+                                is_gif = True
+                            elif 'gif' in extraer_categorias(message):
+                                is_gif = True
+                            if is_gif:
+                                gifs.append(message.id)
                 display_query = query
 
             user_searches[chat_id] = {
-                "all_ids": all_ids, "photos": photos, "videos": videos,
+                "all_ids": all_ids, "photos": photos, "videos": videos, "gifs": gifs,
                 "page": 0, "filter": "all", "query": display_query, "origen": "menu"
             }
             await status_msg.delete()
             await send_page(chat_id)
 
-        # --- SISTEMA DE CONFIRMACIÓN PARA ELIMINAR ---
         elif data.startswith("req_del_"):
             msg_id = int(data.replace("req_del_", ""))
             botones_confirmacion = [
@@ -580,9 +630,7 @@ async def main():
                 await event.edit(text="🗑️ *[Archivo eliminado]*", buttons=None)
             except Exception as e:
                 await event.answer(f"❌ Error al eliminar: {str(e)}", alert=True)
-        # ---------------------------------------------
 
-        # --- SUBMENÚ INTERACTIVO PARA MOVER UN SOLO ARCHIVO ---
         elif data.startswith("req_mover_"):
             msg_id = int(data.replace("req_mover_", ""))
             if chat_id not in user_searches:
@@ -681,7 +729,7 @@ async def main():
 
                 try:
                     await user.edit_message(CHANNEL_ID, msg_id, text=nuevo_texto)
-                    await event.edit(f"✅ **¡Archivo movido con éxito!**\nSe le añadió la etiqueta `#{destino}` (ID: `{msg_id}`). Ya no aparecerá como sin nombre.")
+                    await event.edit(f"✅ **¡Archivo movido con éxito!**\nSe le añadió la etiqueta `#{destino}` (ID: `{msg_id}`).")
                 except Exception as e:
                     await event.edit(f"❌ Error al editar el mensaje en Telegram: {str(e)}")
             else:
@@ -689,8 +737,6 @@ async def main():
 
         elif data == "cancel_smove":
             await event.edit("❌ Operación de movimiento cancelada.")
-
-        # --- FIN DEL SUBMENÚ ---
 
         elif data == "mover_modo_todos":
             info = user_searches.get(chat_id)
