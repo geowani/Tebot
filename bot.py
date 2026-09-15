@@ -96,6 +96,11 @@ def extraer_categorias(message):
 
     return list(categorias)
 
+def crear_barra_progreso(porcentaje, longitud=10):
+    llenos = int(round(longitud * porcentaje / 100))
+    vacios = longitud - llenos
+    return "▓" * llenos + "░" * vacios
+
 async def main():
     bot = TelegramClient('bot_session', int(API_ID), API_HASH)
     user = TelegramClient(StringSession(USER_SESSION_STRING), int(API_ID), API_HASH)
@@ -111,7 +116,6 @@ async def main():
         query = data["query"]
         origen = data.get("origen", "menu")
         
-        # Aplicar filtro por tipo de medio
         if filter_type == "photos":
             current_list = data["photos"]
         elif filter_type == "videos":
@@ -133,10 +137,7 @@ async def main():
             await bot.send_message(chat_id, "Error al reenviar los archivos.")
             return
         
-        # Construcción de botones de navegación y filtros
         botones = []
-        
-        # Fila de Filtros
         filtros_row = []
         if filter_type != "all":
             filtros_row.append(Button.inline("📁 Ver Todo", data=b"filter_all"))
@@ -147,7 +148,6 @@ async def main():
         if filtros_row:
             botones.append(filtros_row)
 
-        # Fila de Paginación
         fila_nav = []
         if end < len(current_list):
             fila_nav.append(Button.inline("➡️ Más archivos", data=b"next_page"))
@@ -199,24 +199,48 @@ async def main():
             return
             
         if texto == '/crear_indice':
-            status = await event.reply("⏳ Creando índice...")
-            indice = {}
-            count = 0
+            status = await event.reply("⏳ Calculando total de mensajes...")
             
-            async for message in user.iter_messages(CHANNEL_ID):
-                count += 1
-                if not (message.photo or message.video or message.document):
-                    continue
+            # Obtener el número total de mensajes en el canal
+            res_total = await user.get_messages(CHANNEL_ID, limit=0)
+            total_mensajes = res_total.total or 1
+            
+            indice = {}
+            procesados = 0
+            ultimo_porcentaje = -1
 
-                cats = extraer_categorias(message)
-                if cats:
-                    for cat in cats:
-                        indice[cat] = indice.get(cat, 0) + 1
-                else:
-                    indice['sin_nombre'] = indice.get('sin_nombre', 0) + 1
+            async for message in user.iter_messages(CHANNEL_ID):
+                procesados += 1
+                porcentaje = int((procesados / total_mensajes) * 100)
+
+                if message.photo or message.video or message.document:
+                    cats = extraer_categorias(message)
+                    if cats:
+                        for cat in cats:
+                            indice[cat] = indice.get(cat, 0) + 1
+                    else:
+                        indice['sin_nombre'] = indice.get('sin_nombre', 0) + 1
+
+                # Actualizar el mensaje de estado cada 5% procesado
+                if porcentaje != ultimo_porcentaje and porcentaje % 5 == 0:
+                    ultimo_porcentaje = porcentaje
+                    barra = crear_barra_progreso(porcentaje)
+                    try:
+                        await status.edit(
+                            f"⏳ **Indexando canal...**\n\n"
+                            f"`[{barra}]` **{porcentaje}%**\n"
+                            f"📊 Procesados: **{procesados:,} / {total_mensajes:,}** msgs"
+                        )
+                    except Exception:
+                        pass
             
             guardar_indice(indice)
-            await status.edit(f"✅ ¡Índice creado! **{len(indice)}** categorías encontradas.")
+            await status.edit(
+                f"✅ **¡Índice creado con éxito!**\n\n"
+                f"🗂️ Categorías encontradas: **{len(indice):,}**\n"
+                f"📂 Archivos sin nombre: **{indice.get('sin_nombre', 0):,}**\n\n"
+                f"Escribe /index para abrir el menú."
+            )
             return
             
         if texto == '/index':
@@ -348,7 +372,6 @@ async def main():
         data = event.data.decode('utf-8')
         chat_id = event.chat_id
 
-        # Navegación y Filtros de Medios
         if data == "next_page":
             if chat_id in user_searches:
                 user_searches[chat_id]["page"] += 1
@@ -363,7 +386,6 @@ async def main():
                 await event.delete()
                 await send_page(chat_id)
 
-        # Menú de carpetas
         elif data == "volver_menu":
             await event.delete()
             await mostrar_menu_principal(chat_id)
@@ -415,7 +437,6 @@ async def main():
             await status_msg.delete()
             await send_page(chat_id)
 
-        # Modos de Mover
         elif data == "mover_modo_todos":
             info = user_searches.get(chat_id)
             if not info: return
