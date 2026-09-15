@@ -1109,10 +1109,15 @@ async def main():
 
     @user.on(events.NewMessage(chats=CHANNEL_ID))
     async def auto_update_index(event):
+        # Ignorar mensajes editados para evitar bucles infinitos al cambiar etiquetas
+        if event.message.edit_date:
+            return
+            
         cats = extraer_categorias(event.message)
         if cats:
             indice = cargar_indice()
-            for cat in cats:
+            cats_unicas = set(cats)
+            for cat in cats_unicas:
                 indice[cat] = indice.get(cat, 0) + 1
             guardar_indice(indice)
 
