@@ -880,6 +880,19 @@ async def main():
 
         elif data.startswith("req_mover_"):
             msg_id = int(data.replace("req_mover_", ""))
+            chat_data = user_searches.get(chat_id, {})
+            selected_ids = chat_data.get("selected_ids", [])
+
+            if selected_ids and len(selected_ids) > 1:
+                chat_data["single_mover_id"] = msg_id
+                botones_opcion = [
+                    [Button.inline(f"📦 Mover SOLO este archivo (ID: {msg_id})", data=f"move_single_only_{msg_id}".encode())],
+                    [Button.inline(f"🚀 Mover los {len(selected_ids)} seleccionados", data=b"batch_move_init")],
+                    [Button.inline("❌ Cancelar", data=b"cancel_smove")]
+                ]
+                await event.edit(f"🔄 Has seleccionado varios archivos. ¿Qué deseas hacer con respecto al botón Mover?", buttons=botones_opcion)
+                return
+
             if chat_id not in user_searches:
                 user_searches[chat_id] = {}
             user_searches[chat_id]["single_mover_id"] = msg_id
@@ -898,6 +911,29 @@ async def main():
 
             await event.edit(
                 f"🔄 **Mover archivo (ID: `{msg_id}`)**\n\nElige una opción o escribe directamente el destino:",
+                buttons=botones
+            )
+
+        elif data.startswith("move_single_only_"):
+            msg_id = int(data.replace("move_single_only_", ""))
+            if chat_id not in user_searches:
+                user_searches[chat_id] = {}
+            user_searches[chat_id]["single_mover_id"] = msg_id
+
+            indice = cargar_indice()
+            categorias_validas = {k: v for k, v in indice.items() if v >= 3}
+            
+            botones = [
+                [Button.inline("⌨️ 🔍 Escribir destino manualmente", data=f"smove_manual_{msg_id}".encode())]
+            ]
+            for label, letras in GRUPOS:
+                count = sum(1 for k in categorias_validas if k[0] in letras)
+                if count > 0:
+                    botones.append([Button.inline(f"🔤 Grupo {label}", data=f"smove_grupo_{label}".encode())])
+            botones.append([Button.inline("❌ Cancelar", data=b"cancel_smove")])
+
+            await event.edit(
+                f"🔄 **Mover archivo individual (ID: `{msg_id}`)**\n\nElige una opción o escribe directamente el destino:",
                 buttons=botones
             )
 
@@ -1050,9 +1086,9 @@ async def main():
                         if not old_cats:
                             indice['sin_nombre'] = max(0, indice.get('sin_nombre', 0) - 1)
                         else:
-                            for c in old_cats:
-                                if c != destino:
-                                    indice[c] = max(0, indice.get(c, 0) - 1)
+                        for c in old_cats:
+                            if c != destino:
+                                indice[c] = max(0, indice.get(c, 0) - 1)
                         indice[destino] = indice.get(destino, 0) + 1
                         guardar_indice(indice)
 
