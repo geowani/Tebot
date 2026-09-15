@@ -42,6 +42,7 @@ except ValueError:
     pass
 
 user_searches = {}
+waiting_manual_move = {}  # Control para búsqueda manual de texto al mover
 INDEX_FILE = 'indice_categorias.json'
 
 def cargar_indice():
@@ -55,6 +56,7 @@ def guardar_indice(datos):
         json.dump(datos, f, indent=4)
 
 def extraer_categorias(message):
+    # Añadido soporte para GIFs explícitamente en documentos o animaciones
     if not (message.photo or message.video or message.document):
         return []
 
@@ -93,6 +95,8 @@ def extraer_categorias(message):
                 categorias.add('whatsapp')
             elif p == 'screenshot':
                 categorias.add('screenshot')
+            elif p == 'gif':
+                categorias.add('gif')
             else:
                 categorias.add(p)
 
@@ -201,13 +205,60 @@ async def main():
 
     @bot.on(events.NewMessage)
     async def bot_handler(event):
-        texto = event.raw_text.lower().strip()
+        texto = event.raw_text.strip()
+        texto_lower = texto.lower()
+        chat_id = event.chat_id
+
+        # Comprobar si el usuario está escribiendo una ruta manual para mover un archivo
+        if chat_id in waiting_manual_move and waiting_manual_move[chat_id]:
+            msg_id = waiting_manual_move[chat_id]
+            waiting_manual_move[chat_id] = None # Limpiar estado
+            destino = texto.lower().replace('#', '').strip()
+
+            message = await user.get_messages(CHANNEL_ID, ids=msg_id)
+            if message:
+                texto_actual = message.text or ""
+                # Si estaba en sin_nombre, limpiamos o asignamos la nueva etiqueta
+                if f"#{destino}" not in texto_actual.lower():
+                    nuevo_texto = f"{texto_actual}\n#{destino}".strip()
+                else:
+                    nuevo_texto = texto_actual
+
+                try:
+                    await user.edit_message(CHANNEL_ID, msg_id, text=nuevo_texto)
+                    # Actualizar índice localmente si aplica
+                    indice = cargar_indice()
+                    indice[destino] = indice.get(destino, 0) + 1
+                    guardar_indice(indice)
+                    await event.reply(f"✅ **¡Archivo movido manualmente con éxito!** Se le asignó `#{destino}` (ID: `{msg_id}`). Ya no aparecerá como sin nombre.")
+                except Exception as e:
+                    await event.reply(f"❌ Error al actualizar el mensaje: {str(e)}")
+            else:
+                await event.reply("❌ No se encontró el mensaje original.")
+            return
         
-        if texto == '/start':
+        if texto_lower == '/start':
             await event.reply("¡Hola! Envíame cualquier palabra o usa /index para navegar.")
             return
+
+        # Comando para eliminar una carpeta completa del índice manual
+        if texto_lower.startswith('/eliminar_carpeta'):
+            partes = texto.split()
+            if len(partes) < 2:
+                await event.reply("⚠️ **Uso incorrecto.**\nEjemplo: `/eliminar_carpeta nombre_categoria`")
+                return
             
-        if texto == '/crear_indice':
+            carpeta_a_borrar = partes[1].lower().replace('#', '')
+            indice = cargar_indice()
+            if carpeta_a_borrar in indice:
+                del indice[carpeta_a_borrar]
+                guardar_indice(indice)
+                await event.reply(f"🗑️ La categoría `#{carpeta_a_borrar}` ha sido eliminada del índice exitosamente.")
+            else:
+                await event.reply(f"❌ La categoría `#{carpeta_a_borrar}` no existe en el índice.")
+            return
+            
+        if texto_lower == '/crear_indice':
             status = await event.reply("⏳ Calculando total de mensajes...")
             
             res_total = await user.get_messages(CHANNEL_ID, limit=0)
@@ -270,7 +321,7 @@ async def main():
             )
             return
             
-        if texto == '/index':
+        if texto_lower == '/index':
             indice = cargar_indice()
             if not indice:
                 await event.reply("El índice está vacío. Escribe /crear_indice primero.")
@@ -278,8 +329,8 @@ async def main():
             await mostrar_menu_principal(event.chat_id, indice)
             return
 
-        if texto.startswith('/mover'):
-            partes = event.raw_text.split()
+        if texto_lower.startswith('/mover'):
+            partes = texto.split()
             if len(partes) < 3:
                 await event.reply("⚠️ **Uso incorrecto.**\nEjemplo: `/mover rojo azul`")
                 return
@@ -510,7 +561,9 @@ async def main():
             indice = cargar_indice()
             categorias_validas = {k: v for k, v in indice.items() if v >= 3}
             
-            botones = []
+            botones = [
+                [Button.inline("⌨️ 🔍 Escribir destino manualmente", data=f"smove_manual_{msg_id}".encode())]
+            ]
             for label, letras in GRUPOS:
                 count = sum(1 for k in categorias_validas if k[0] in letras)
                 if count > 0:
@@ -518,8 +571,16 @@ async def main():
             botones.append([Button.inline("❌ Cancelar", data=b"cancel_smove")])
 
             await event.edit(
-                f"🔄 **Mover archivo (ID: `{msg_id}`)**\n\nElige el **grupo** de la categoría de destino:",
+                f"🔄 **Mover archivo (ID: `{msg_id}`)**\n\nElige una opción o escribe directamente el destino:",
                 buttons=botones
+            )
+
+        elif data.startswith("smove_manual_"):
+            msg_id = int(data.replace("smove_manual_", ""))
+            waiting_manual_move[chat_id] = msg_id
+            await event.edit(
+                f"✍️ **Búsqueda manual de destino (ID: `{msg_id}`)**\n\n"
+                f"Por favor, **escribe el nombre de la categoría/carpeta destino** en el chat (ejemplo: `rojo`):"
             )
 
         elif data.startswith("smove_grupo_"):
@@ -556,7 +617,9 @@ async def main():
             indice = cargar_indice()
             categorias_validas = {k: v for k, v in indice.items() if v >= 3}
             
-            botones = []
+            botones = [
+                [Button.inline("⌨️ 🔍 Escribir destino manualmente", data=f"smove_manual_{msg_id}".encode())]
+            ]
             for label, letras in GRUPOS:
                 count = sum(1 for k in categorias_validas if k[0] in letras)
                 if count > 0:
@@ -564,7 +627,7 @@ async def main():
             botones.append([Button.inline("❌ Cancelar", data=b"cancel_smove")])
 
             await event.edit(
-                f"🔄 **Mover archivo (ID: `{msg_id}`)**\n\nElige el **grupo** de la categoría de destino:",
+                f"🔄 **Mover archivo (ID: `{msg_id}`)**\n\nElige una opción o escribe directamente el destino:",
                 buttons=botones
             )
 
@@ -587,7 +650,7 @@ async def main():
 
                 try:
                     await user.edit_message(CHANNEL_ID, msg_id, text=nuevo_texto)
-                    await event.edit(f"✅ **¡Archivo movido con éxito!**\nSe le añadió la etiqueta `#{destino}` (ID: `{msg_id}`).")
+                    await event.edit(f"✅ **¡Archivo movido con éxito!**\nSe le añadió la etiqueta `#{destino}` (ID: `{msg_id}`). Ya no aparecerá como sin nombre.")
                 except Exception as e:
                     await event.edit(f"❌ Error al editar el mensaje en Telegram: {str(e)}")
             else:
@@ -635,7 +698,7 @@ async def main():
 
                     try:
                         await user.edit_message(CHANNEL_ID, msg_id, text=nuevo_texto)
-                        await event.answer("✅ Movido")
+                        await event.answer("✅ Movido y limpiado de ubicación anterior")
                     except Exception:
                         await event.answer("❌ Error")
 
