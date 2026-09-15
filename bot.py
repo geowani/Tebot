@@ -9,7 +9,7 @@ from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
 from dotenv import load_dotenv
 
-# --- SERVIDOR WEB PARA MANTENER ACTIVO EL WEB SERVICE EN RENDER ---
+# --- SERVIDOR WEB EN RENDER ---
 app = Flask('')
 
 @app.route('/')
@@ -20,10 +20,9 @@ def run_flask():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
 
-# Iniciar el servidor web en un hilo independiente
 threading.Thread(target=run_flask, daemon=True).start()
 
-# --- CONFIGURACIÓN DE TELEGRAM Y TELETHON ---
+# --- CONFIGURACIÓN DE TELEGRAM ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -54,23 +53,16 @@ def guardar_indice(datos):
         json.dump(datos, f, indent=4)
 
 def extraer_categorias(message):
-    """
-    Extrae TODAS las palabras significativas de un mensaje.
-    Ej: 'nicolette_shea_01.mp4' -> ['nicolette', 'shea']
-    Retorna una lista (puede ser vacía).
-    """
     if not (message.photo or message.video or message.document):
         return []
 
     categorias = set()
 
-    # 1. Buscar hashtags (#shea, #nicolette, etc.)
     if message.text:
         hashtags = re.findall(r'#(\w+)', message.text)
         for tag in hashtags:
             categorias.add(tag.lower())
 
-    # 2. Extraer palabras del nombre del archivo o del texto
     texto_base = ""
     if message.file and message.file.name:
         texto_base = message.file.name.lower()
@@ -105,72 +97,114 @@ def extraer_categorias(message):
     return list(categorias)
 
 async def main():
-    print("Iniciando conexión...")
-    
     bot = TelegramClient('bot_session', int(API_ID), API_HASH)
     user = TelegramClient(StringSession(USER_SESSION_STRING), int(API_ID), API_HASH)
     
     await bot.start(bot_token=BOT_TOKEN)
     await user.start()
-    
-    print("\n" + "="*50)
-    print("✅ ¡Bot con Índice Automático listo!")
-    print("="*50 + "\n")
 
     async def send_page(chat_id):
         data = user_searches.get(chat_id)
         if not data: return
         page = data["page"]
-        ids = data["ids"]
+        filter_type = data.get("filter", "all")
         query = data["query"]
         origen = data.get("origen", "menu")
         
+        # Aplicar filtro por tipo de medio
+        if filter_type == "photos":
+            current_list = data["photos"]
+        elif filter_type == "videos":
+            current_list = data["videos"]
+        else:
+            current_list = data["all_ids"]
+            
         start = page * 5
         end = start + 5
-        current_ids = ids[start:end]
+        current_ids = current_list[start:end]
         
+        if not current_ids:
+            await bot.send_message(chat_id, f"No hay archivos para este filtro en '{query}'.")
+            return
+
         try:
             await bot.forward_messages(chat_id, current_ids, from_peer=CHANNEL_ID)
-        except Exception as e:
+        except Exception:
             await bot.send_message(chat_id, "Error al reenviar los archivos.")
             return
         
-        fila_nav = []
-        if end < len(ids):
-            fila_nav.append(Button.inline("➡️ Más archivos", data=b"next_page"))
+        # Construcción de botones de navegación y filtros
+        botones = []
         
-        fila_nav.append(Button.inline("⬅️ Volver", data=f"volver_{origen}".encode()))
+        # Fila de Filtros
+        filtros_row = []
+        if filter_type != "all":
+            filtros_row.append(Button.inline("📁 Ver Todo", data=b"filter_all"))
+        if filter_type != "photos" and len(data["photos"]) > 0:
+            filtros_row.append(Button.inline(f"🖼️ Fotos ({len(data['photos'])})", data=b"filter_photos"))
+        if filter_type != "videos" and len(data["videos"]) > 0:
+            filtros_row.append(Button.inline(f"🎥 Videos ({len(data['videos'])})", data=b"filter_videos"))
+        if filtros_row:
+            botones.append(filtros_row)
 
-        msg_text = f"📄 Mostrando archivos {start+1} a {min(end, len(ids))} de **{len(ids)}** encontrados para '{query}'."
-        if end >= len(ids):
+        # Fila de Paginación
+        fila_nav = []
+        if end < len(current_list):
+            fila_nav.append(Button.inline("➡️ Más archivos", data=b"next_page"))
+        fila_nav.append(Button.inline("⬅️ Volver", data=f"volver_{origen}".encode()))
+        botones.append(fila_nav)
+
+        msg_text = f"📄 Mostrando {start+1} a {min(end, len(current_list))} de **{len(current_list)}** en '{query}'."
+        if end >= len(current_list):
             msg_text += "\n✅ Fin de los resultados."
 
-        await bot.send_message(chat_id, msg_text, buttons=[fila_nav])
+        await bot.send_message(chat_id, msg_text, buttons=botones)
+
+    async def mostrar_archivo_para_mover(chat_id):
+        data = user_searches.get(chat_id)
+        if not data or "mover_ids" not in data:
+            return
+
+        idx = data["mover_index"]
+        ids = data["mover_ids"]
+        origen = data["origen_mov"]
+        destino = data["destino_mov"]
+
+        if idx >= len(ids):
+            await bot.send_message(chat_id, f"✅ **¡Proceso individual finalizado!** Se revisaron los {len(ids)} archivos.")
+            return
+
+        msg_id = ids[idx]
+        await bot.forward_messages(chat_id, msg_id, from_peer=CHANNEL_ID)
+
+        botones = [
+            [
+                Button.inline(f"✅ Mover a #{destino}", data=f"confirm_mover_{msg_id}".encode()),
+                Button.inline("⏭️ Omitir", data=b"skip_mover")
+            ]
+        ]
+
+        await bot.send_message(
+            chat_id,
+            f"📌 **Archivo {idx + 1} de {len(ids)}**\n¿Mover de `#{origen}` a `#{destino}`?",
+            buttons=botones
+        )
 
     @bot.on(events.NewMessage)
     async def bot_handler(event):
         texto = event.raw_text.lower().strip()
         
         if texto == '/start':
-            await event.reply(
-                "¡Hola! Envíame cualquier palabra para buscar.\n\n"
-                "Comandos especiales:\n"
-                "/crear_indice - Escanea el canal para armar el menú\n"
-                "/index - Muestra el menú de nombres\n"
-                "/mover origen destino - Mueve archivos de una etiqueta a otra (Ej: `/mover rojo azul`)"
-            )
+            await event.reply("¡Hola! Envíame cualquier palabra o usa /index para navegar.")
             return
             
         if texto == '/crear_indice':
-            status = await event.reply("⏳ Iniciando escaneo profundo para crear el índice... (Esto tomará unos minutos).")
+            status = await event.reply("⏳ Creando índice...")
             indice = {}
             count = 0
             
             async for message in user.iter_messages(CHANNEL_ID):
                 count += 1
-                if count % 10000 == 0:
-                    await status.edit(f"⏳ Escaneando... {count} mensajes revisados...")
-                
                 if not (message.photo or message.video or message.document):
                     continue
 
@@ -182,13 +216,7 @@ async def main():
                     indice['sin_nombre'] = indice.get('sin_nombre', 0) + 1
             
             guardar_indice(indice)
-            sin_nombre = indice.get('sin_nombre', 0)
-            await status.edit(
-                f"✅ ¡Índice creado con éxito!\n"
-                f"Se encontraron **{len(indice)}** categorías distintas.\n"
-                f"📁 Archivos sin nombre detectados: **{sin_nombre:,}**\n"
-                f"Escribe **/index** para ver el menú."
-            )
+            await status.edit(f"✅ ¡Índice creado! **{len(indice)}** categorías encontradas.")
             return
             
         if texto == '/index':
@@ -202,189 +230,149 @@ async def main():
         if texto.startswith('/mover'):
             partes = event.raw_text.split()
             if len(partes) < 3:
-                await event.reply("⚠️ **Uso incorrecto.**\nEjemplo: `/mover rojo azul` (mueve los archivos etiquetados como 'rojo' a la carpeta 'azul').")
+                await event.reply("⚠️ **Uso incorrecto.**\nEjemplo: `/mover rojo azul`")
                 return
 
             origen = partes[1].lower().replace('#', '')
             destino = partes[2].lower().replace('#', '')
 
-            status = await event.reply(f"⏳ Buscando archivos de **#{origen}** para moverlos a **#{destino}**...")
-
-            count = 0
-            async for message in user.iter_messages(CHANNEL_ID, search=origen):
-                if not (message.photo or message.video or message.document):
-                    continue
-
-                texto_actual = message.text or ""
-                
-                nuevo_texto = re.sub(rf'#{re.escape(origen)}\b', f'#{destino}', texto_actual, flags=re.IGNORECASE)
-                
-                if nuevo_texto == texto_actual and origen in texto_actual.lower():
-                    nuevo_texto = re.sub(rf'\b{re.escape(origen)}\b', destino, texto_actual, flags=re.IGNORECASE)
-
-                if nuevo_texto != texto_actual:
-                    try:
-                        await user.edit_message(CHANNEL_ID, message.id, text=nuevo_texto)
-                        count += 1
-                        await asyncio.sleep(1)
-                    except Exception as e:
-                        logger.error(f"Error editando mensaje {message.id}: {e}")
-
-            if count > 0:
-                indice = cargar_indice()
-                
-                if origen in indice:
-                    indice[origen] = max(0, indice[origen] - count)
-                    if indice[origen] == 0:
-                        del indice[origen]
-
-                indice[destino] = indice.get(destino, 0) + count
-                guardar_indice(indice)
-
-                await status.edit(f"✅ **¡Movimiento completado!**\nSe actualizaron **{count}** archivos de `#{origen}` a `#{destino}`.")
-            else:
-                await status.edit(f"❌ No se encontraron mensajes con la etiqueta `#{origen}` para modificar.")
-            return
-
-        query = event.raw_text
-        status_msg = await event.reply(f"🔍 Buscando '{query}'...")
-        try:
+            status = await event.reply(f"🔍 Buscando archivos con **#{origen}**...")
             ids = []
-            async for message in user.iter_messages(CHANNEL_ID, search=query, limit=200):
+            async for message in user.iter_messages(CHANNEL_ID, search=origen, limit=300):
                 if message.photo or message.video or message.document:
                     ids.append(message.id)
+
             if not ids:
-                await status_msg.edit(f"No encontré archivos para '{query}'.")
+                await status.edit(f"❌ No se encontraron archivos para `#{origen}`.")
                 return
-            user_searches[event.chat_id] = {"ids": ids, "page": 0, "query": query}
-            await status_msg.edit(f"✅ Encontré **{len(ids)}** archivos. Enviando los primeros 5:")
-            await send_page(event.chat_id)
-        except Exception as e:
-            await status_msg.edit("Hubo un error al buscar.")
+
+            user_searches[event.chat_id] = {
+                "mover_ids": ids,
+                "mover_index": 0,
+                "origen_mov": origen,
+                "destino_mov": destino
+            }
+
+            botones = [
+                [Button.inline(f"🚀 Mover TODOS ({len(ids)}) de golpe", data=b"mover_modo_todos")],
+                [Button.inline("👁️ Seleccionar / Mover 1 por 1", data=b"mover_modo_indiv")]
+            ]
+            await status.edit(
+                f"📂 Se encontraron **{len(ids)}** archivos etiquetados como `#{origen}`.\n"
+                f"¿Cómo deseas moverlos a `#{destino}`?",
+                buttons=botones
+            )
+            return
+
+        # Búsqueda libre
+        query = event.raw_text
+        status_msg = await event.reply(f"🔍 Buscando '{query}'...")
+        all_ids, photos, videos = [], [], []
+
+        async for message in user.iter_messages(CHANNEL_ID, search=query, limit=200):
+            if message.photo or message.video or message.document:
+                all_ids.append(message.id)
+                if message.photo:
+                    photos.append(message.id)
+                elif message.video:
+                    videos.append(message.id)
+
+        if not all_ids:
+            await status_msg.edit(f"No se encontraron archivos para '{query}'.")
+            return
+
+        user_searches[event.chat_id] = {
+            "all_ids": all_ids,
+            "photos": photos,
+            "videos": videos,
+            "page": 0,
+            "filter": "all",
+            "query": query,
+            "origen": "menu"
+        }
+        await status_msg.delete()
+        await send_page(event.chat_id)
 
     GRUPOS = [
-        ("A-C", "abc"),
-        ("D-F", "def"),
-        ("G-I", "ghi"),
-        ("J-L", "jkl"),
-        ("M-O", "mno"),
-        ("P-R", "pqr"),
-        ("S-U", "stu"),
-        ("V-Z", "vwxyz"),
-        ("📂 Sin nombre / Otros", ""),
+        ("A-C", "abc"), ("D-F", "def"), ("G-I", "ghi"),
+        ("J-L", "jkl"), ("M-O", "mno"), ("P-R", "pqr"),
+        ("S-U", "stu"), ("V-Z", "vwxyz")
     ]
 
     async def mostrar_menu_principal(chat_id, indice=None):
-        if indice is None:
-            indice = cargar_indice()
+        if indice is None: indice = cargar_indice()
         categorias_validas = {k: v for k, v in indice.items() if v >= 3}
 
         botones = []
         for label, letras in GRUPOS:
-            if letras:
-                count = sum(1 for k in categorias_validas if k[0] in letras)
-            else:
-                count = sum(1 for k in categorias_validas if not k[0].isalpha())
+            count = sum(1 for k in categorias_validas if k[0] in letras)
             if count > 0:
-                botones.append([Button.inline(f"🔤 {label}  ({count} nombres)", data=f"grupo_{label}".encode())])
+                botones.append([Button.inline(f"🔤 {label} ({count} nombres)", data=f"grupo_{label}".encode())])
 
-        if not botones:
-            await bot.send_message(chat_id, "No hay categorías disponibles.")
-            return
+        sin_nombre_count = indice.get("sin_nombre", 0)
+        if sin_nombre_count > 0:
+            botones.append([Button.inline(f"📂 Sin nombre ({sin_nombre_count:,} archivos)", data=b"search_sin_nombre")])
 
         total = sum(categorias_validas.values())
         await bot.send_message(
             chat_id,
-            f"📚 **Índice de tu Canal**\n_{len(categorias_validas)} nombres · {total:,} archivos indexados_\n\nElige un grupo de letras:",
+            f"📚 **Índice del Canal**\n_{len(categorias_validas)} nombres · {total:,} archivos_\n\nElige una opción:",
             buttons=botones
         )
 
     async def mostrar_grupo(chat_id, label, letras):
         indice = cargar_indice()
         categorias_validas = {k: v for k, v in indice.items() if v >= 3}
-
-        if not letras:
-            await mostrar_letra(chat_id, "", label, letras)
-            return
-
         botones = []
         for letra in letras:
             cats = [(k, v) for k, v in categorias_validas.items() if k.startswith(letra)]
-            count_cats = len(cats)
-            count_files = sum(v for _, v in cats)
-            if count_cats > 0:
-                botones.append([Button.inline(
-                    f"🔡 {letra.upper()}  —  {count_cats} carpetas · {count_files:,} archivos",
-                    data=f"letra_{letra}|{label}|{letras}".encode()
-                )])
+            if len(cats) > 0:
+                botones.append([Button.inline(f"🔡 {letra.upper()} — {len(cats)} carpetas", data=f"letra_{letra}|{label}|{letras}".encode())])
 
-        if not botones:
-            await bot.send_message(chat_id, "No hay nombres en este grupo.")
-            return
-
-        botones.append([Button.inline("⬅️ Volver al menú principal", data=b"volver_menu")])
-        await bot.send_message(
-            chat_id,
-            f"🔤 **Grupo {label}**\nElige una letra:",
-            buttons=botones
-        )
+        botones.append([Button.inline("⬅️ Volver", data=b"volver_menu")])
+        await bot.send_message(chat_id, f"🔤 **Grupo {label}**", buttons=botones)
 
     async def mostrar_letra(chat_id, letra, label_grupo, letras_grupo):
         indice = cargar_indice()
         categorias_validas = {k: v for k, v in indice.items() if v >= 3}
+        filtradas = sorted([(k, v) for k, v in categorias_validas.items() if k.startswith(letra)], key=lambda x: x[0])
 
-        if letra:
-            filtradas = [(k, v) for k, v in categorias_validas.items() if k.startswith(letra)]
-            filtradas = sorted(filtradas, key=lambda x: x[0])
-            header = f"🔡 **Letra {letra.upper()}** — {len(filtradas)} carpetas\nElige una:"
-            volver_data = f"volver_grupo_{label_grupo}".encode()
-        else:
-            filtradas = [(k, v) for k, v in categorias_validas.items() if not k[0].isalpha()]
-            filtradas = sorted(filtradas, key=lambda x: (x[0] != 'sin_nombre', x[0]))
-            header = f"📂 **Sin nombre / Otros** — {len(filtradas)} categorías\nElige una:"
-            volver_data = b"volver_menu"
+        botones = [[Button.inline(f"📁 {k.capitalize()} ({v:,})", data=f"search_{k}".encode())] for k, v in filtradas]
+        botones.append([Button.inline("⬅️ Volver", data=f"volver_grupo_{label_grupo}".encode())])
 
-        if not filtradas:
-            await bot.send_message(chat_id, "No hay carpetas aquí.")
-            return
-
-        botones = []
-        for nombre, cantidad in filtradas:
-            display = "📂 Sin nombre" if nombre == "sin_nombre" else nombre.capitalize()
-            botones.append([Button.inline(f"📁 {display} ({cantidad:,})", data=f"search_{nombre}".encode())])
-
-        botones.append([Button.inline("⬅️ Volver", data=volver_data)])
-
-        chunk_size = 95
-        for i in range(0, len(botones), chunk_size):
-            chunk = botones[i:i + chunk_size]
-            msg = header if i == 0 else f"🔡 **{letra.upper() if letra else 'Otros'}** (continuación)"
-            await bot.send_message(chat_id, msg, buttons=chunk)
+        for i in range(0, len(botones), 95):
+            await bot.send_message(chat_id, f"🔡 **Letra {letra.upper()}**", buttons=botones[i:i + 95])
 
     @bot.on(events.CallbackQuery)
     async def callback_handler(event):
         data = event.data.decode('utf-8')
         chat_id = event.chat_id
 
+        # Navegación y Filtros de Medios
         if data == "next_page":
             if chat_id in user_searches:
                 user_searches[chat_id]["page"] += 1
                 await event.delete()
                 await send_page(chat_id)
-            else:
-                await event.answer("Búsqueda expirada.")
 
-        elif data.startswith("volver_"):
-            destino = data[len("volver_"):]
+        elif data.startswith("filter_"):
+            tipo = data[len("filter_"):]
+            if chat_id in user_searches:
+                user_searches[chat_id]["filter"] = tipo
+                user_searches[chat_id]["page"] = 0
+                await event.delete()
+                await send_page(chat_id)
+
+        # Menú de carpetas
+        elif data == "volver_menu":
             await event.delete()
-            if destino == "menu":
-                await mostrar_menu_principal(chat_id)
-            elif destino.startswith("grupo_"):
-                label = destino[len("grupo_"):]
-                letras = next((l for lbl, l in GRUPOS if lbl == label), "")
-                await mostrar_grupo(chat_id, label, letras)
-            else:
-                await mostrar_menu_principal(chat_id)
+            await mostrar_menu_principal(chat_id)
+
+        elif data.startswith("volver_grupo_"):
+            label = data[len("volver_grupo_"):]
+            letras = next((l for lbl, l in GRUPOS if lbl == label), "")
+            await event.delete()
+            await mostrar_grupo(chat_id, label, letras)
 
         elif data.startswith("grupo_"):
             label = data[len("grupo_"):]
@@ -394,49 +382,91 @@ async def main():
 
         elif data.startswith("letra_"):
             partes = data[len("letra_"):].split("|")
-            letra = partes[0]
-            label_grupo = partes[1] if len(partes) > 1 else ""
-            letras_grupo = partes[2] if len(partes) > 2 else ""
             await event.delete()
-            await mostrar_letra(chat_id, letra, label_grupo, letras_grupo)
+            await mostrar_letra(chat_id, partes[0], partes[1], partes[2])
 
         elif data.startswith("search_"):
             query = data[len("search_"):]
-
-            primera = query[0] if query else ""
-            origen_grupo = next(
-                (f"grupo_{lbl}" for lbl, letras in GRUPOS if primera in letras),
-                "menu"
-            )
-
             await event.delete()
 
+            status_msg = await bot.send_message(chat_id, f"🔍 Cargando '{query}'...")
+            all_ids, photos, videos = [], [], []
+
             if query == "sin_nombre":
-                status_msg = await bot.send_message(chat_id, "🔍 Buscando archivos sin nombre (esto puede tardar un poco)...")
-                ids = []
                 async for message in user.iter_messages(CHANNEL_ID, limit=5000):
-                    if not (message.photo or message.video or message.document):
-                        continue
-                    cats = extraer_categorias(message)
-                    if not cats:
-                        ids.append(message.id)
-                    if len(ids) >= 200:
-                        break
+                    if (message.photo or message.video or message.document) and not extraer_categorias(message):
+                        all_ids.append(message.id)
+                        if message.photo: photos.append(message.id)
+                        elif message.video: videos.append(message.id)
+                        if len(all_ids) >= 200: break
                 display_query = "Sin nombre"
             else:
-                status_msg = await bot.send_message(chat_id, f"🔍 Buscando '{query}'...")
-                ids = []
                 async for message in user.iter_messages(CHANNEL_ID, search=query, limit=200):
                     if message.photo or message.video or message.document:
-                        ids.append(message.id)
+                        all_ids.append(message.id)
+                        if message.photo: photos.append(message.id)
+                        elif message.video: videos.append(message.id)
                 display_query = query
 
-            if not ids:
-                await status_msg.edit(f"No encontré archivos para '{display_query}'.")
-                return
-            user_searches[chat_id] = {"ids": ids, "page": 0, "query": display_query, "origen": origen_grupo}
-            await status_msg.edit(f"✅ Encontré **{len(ids)}** archivos para '{display_query}'. Enviando los primeros 5:")
+            user_searches[chat_id] = {
+                "all_ids": all_ids, "photos": photos, "videos": videos,
+                "page": 0, "filter": "all", "query": display_query, "origen": "menu"
+            }
+            await status_msg.delete()
             await send_page(chat_id)
+
+        # Modos de Mover
+        elif data == "mover_modo_todos":
+            info = user_searches.get(chat_id)
+            if not info: return
+            await event.edit("⏳ Moviendo todos los archivos en lote...")
+            origen, destino = info["origen_mov"], info["destino_mov"]
+            count = 0
+
+            for msg_id in info["mover_ids"]:
+                message = await user.get_messages(CHANNEL_ID, ids=msg_id)
+                if message:
+                    texto_actual = message.text or ""
+                    nuevo_texto = re.sub(rf'#{re.escape(origen)}\b', f'#{destino}', texto_actual, flags=re.IGNORECASE)
+                    if nuevo_texto != texto_actual:
+                        await user.edit_message(CHANNEL_ID, msg_id, text=nuevo_texto)
+                        count += 1
+                        await asyncio.sleep(1)
+
+            await event.edit(f"✅ Se movieron **{count}** archivos de `#{origen}` a `#{destino}`.")
+
+        elif data == "mover_modo_indiv":
+            await event.delete()
+            await mostrar_archivo_para_mover(chat_id)
+
+        elif data.startswith("confirm_mover_"):
+            msg_id = int(data[len("confirm_mover_"):])
+            info = user_searches.get(chat_id)
+            if info:
+                origen, destino = info["origen_mov"], info["destino_mov"]
+                message = await user.get_messages(CHANNEL_ID, ids=msg_id)
+                if message:
+                    texto_actual = message.text or ""
+                    nuevo_texto = re.sub(rf'#{re.escape(origen)}\b', f'#{destino}', texto_actual, flags=re.IGNORECASE)
+                    if nuevo_texto == texto_actual and origen in texto_actual.lower():
+                        nuevo_texto = re.sub(rf'\b{re.escape(origen)}\b', destino, texto_actual, flags=re.IGNORECASE)
+
+                    try:
+                        await user.edit_message(CHANNEL_ID, msg_id, text=nuevo_texto)
+                        await event.answer("✅ Movido")
+                    except Exception:
+                        await event.answer("❌ Error")
+
+                info["mover_index"] += 1
+                await event.delete()
+                await mostrar_archivo_para_mover(chat_id)
+
+        elif data == "skip_mover":
+            info = user_searches.get(chat_id)
+            if info:
+                info["mover_index"] += 1
+                await event.delete()
+                await mostrar_archivo_para_mover(chat_id)
 
     @user.on(events.NewMessage(chats=CHANNEL_ID))
     async def auto_update_index(event):
