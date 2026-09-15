@@ -42,7 +42,8 @@ except ValueError:
     pass
 
 user_searches = {}
-waiting_manual_move = {}  # Control para búsqueda manual de texto al mover
+waiting_manual_move = {}        
+waiting_batch_manual_move = {}  
 INDEX_FILE = 'indice_categorias.json'
 
 def cargar_indice():
@@ -120,8 +121,8 @@ async def main():
         filter_type = data.get("filter", "all")
         query = data["query"]
         origen = data.get("origen", "menu")
+        selected_ids = data.get("selected_ids", [])
         
-        # Selección de lista según el filtro activo
         if filter_type == "photos":
             current_list = data["photos"]
         elif filter_type == "videos":
@@ -149,8 +150,12 @@ async def main():
 
         for msg_id in current_ids:
             try:
+                is_selected = msg_id in selected_ids
+                select_text = "✅ Seleccionado" if is_selected else "☑️ Seleccionar"
+                
                 botones_acciones = [
                     [
+                        Button.inline(select_text, data=f"toggle_sel_{msg_id}".encode()),
                         Button.inline("🔄 Mover", data=f"req_mover_{msg_id}".encode()),
                         Button.inline("🗑️ Eliminar", data=f"req_del_{msg_id}".encode())
                     ]
@@ -161,6 +166,10 @@ async def main():
                 pass
         
         botones = []
+        
+        if selected_ids:
+            botones.append([Button.inline(f"🚀 Mover {len(selected_ids)} seleccionados a...", data=b"batch_move_init")])
+
         filtros_row = []
         if filter_type != "all":
             filtros_row.append(Button.inline("📁 Ver Todo", data=b"filter_all"))
@@ -181,6 +190,8 @@ async def main():
         botones.append(fila_nav)
 
         msg_text = f"📄 Mostrando {start+1} a {min(end, len(current_list))} de **{len(current_list)}** en '{query}'."
+        if selected_ids:
+            msg_text += f"\n📌 Archivos seleccionados en total: **{len(selected_ids)}**"
         if end >= len(current_list):
             msg_text += "\n✅ Fin de los resultados."
 
@@ -222,6 +233,53 @@ async def main():
         texto_lower = texto.lower()
         chat_id = event.chat_id
 
+        if chat_id in waiting_batch_manual_move and waiting_batch_manual_move[chat_id]:
+            waiting_batch_manual_move[chat_id] = False
+            destino = texto.lower().replace('#', '').strip()
+            chat_data = user_searches.get(chat_id, {})
+            batch_ids = chat_data.get("batch_mover_ids", [])
+
+            if not batch_ids:
+                await event.reply("❌ No hay archivos seleccionados para mover.")
+                return
+
+            status_reply = await event.reply(f"⏳ Moviendo {len(batch_ids)} archivos a `#{destino}`...")
+            exitosos = 0
+            indice = cargar_indice()
+            
+            for msg_id in batch_ids:
+                message = await user.get_messages(CHANNEL_ID, ids=msg_id)
+                if message:
+                    old_cats = extraer_categorias(message)
+                    texto_actual = message.text or ""
+                    if f"#{destino}" not in texto_actual.lower():
+                        nuevo_texto = f"{texto_actual}\n#{destino}".strip()
+                    else:
+                        nuevo_texto = texto_actual
+
+                    try:
+                        await user.edit_message(CHANNEL_ID, msg_id, text=nuevo_texto)
+                        exitosos += 1
+                        
+                        if not old_cats:
+                            indice['sin_nombre'] = max(0, indice.get('sin_nombre', 0) - 1)
+                        else:
+                            for c in old_cats:
+                                if c != destino:
+                                    indice[c] = max(0, indice.get(c, 0) - 1)
+                        indice[destino] = indice.get(destino, 0) + 1
+                        
+                        await asyncio.sleep(0.5)
+                    except Exception:
+                        pass
+
+            guardar_indice(indice)
+            chat_data["selected_ids"] = []
+            chat_data["batch_mover_ids"] = []
+
+            await status_reply.edit(f"✅ **¡{exitosos} archivos movidos manualmente con éxito a `#{destino}`!**")
+            return
+
         if chat_id in waiting_manual_move and waiting_manual_move[chat_id]:
             msg_id = waiting_manual_move[chat_id]
             waiting_manual_move[chat_id] = None 
@@ -229,6 +287,7 @@ async def main():
 
             message = await user.get_messages(CHANNEL_ID, ids=msg_id)
             if message:
+                old_cats = extraer_categorias(message)
                 texto_actual = message.text or ""
                 if f"#{destino}" not in texto_actual.lower():
                     nuevo_texto = f"{texto_actual}\n#{destino}".strip()
@@ -238,8 +297,15 @@ async def main():
                 try:
                     await user.edit_message(CHANNEL_ID, msg_id, text=nuevo_texto)
                     indice = cargar_indice()
+                    if not old_cats:
+                        indice['sin_nombre'] = max(0, indice.get('sin_nombre', 0) - 1)
+                    else:
+                        for c in old_cats:
+                            if c != destino:
+                                indice[c] = max(0, indice.get(c, 0) - 1)
                     indice[destino] = indice.get(destino, 0) + 1
                     guardar_indice(indice)
+                    
                     await event.reply(f"✅ **¡Archivo movido manualmente con éxito!** Se le asignó `#{destino}` (ID: `{msg_id}`).")
                 except Exception as e:
                     await event.reply(f"❌ Error al actualizar el mensaje: {str(e)}")
@@ -372,7 +438,8 @@ async def main():
                 "mover_ids": ids,
                 "mover_index": 0,
                 "origen_mov": origen,
-                "destino_mov": destino
+                "destino_mov": destino,
+                "selected_ids": []
             }
 
             botones = [
@@ -398,7 +465,6 @@ async def main():
                 elif message.video:
                     videos.append(message.id)
                 elif message.document:
-                    # Detectar si es un GIF por extensión o atributos del archivo
                     is_gif = False
                     if message.file and message.file.name and message.file.name.lower().endswith('.gif'):
                         is_gif = True
@@ -429,7 +495,8 @@ async def main():
             "page": 0,
             "filter": "all",
             "query": query,
-            "origen": "menu"
+            "origen": "menu",
+            "selected_ids": []
         }
         await status_msg.delete()
         await send_page(event.chat_id)
@@ -488,6 +555,166 @@ async def main():
     async def callback_handler(event):
         data = event.data.decode('utf-8')
         chat_id = event.chat_id
+
+        if data.startswith("toggle_sel_"):
+            msg_id = int(data.replace("toggle_sel_", ""))
+            chat_data = user_searches.get(chat_id)
+            if chat_data:
+                if "selected_ids" not in chat_data:
+                    chat_data["selected_ids"] = []
+                if msg_id in chat_data["selected_ids"]:
+                    chat_data["selected_ids"].remove(msg_id)
+                    await event.answer("❌ Deseleccionado")
+                else:
+                    chat_data["selected_ids"].append(msg_id)
+                    await event.answer("✅ Seleccionado")
+                
+                is_selected = msg_id in chat_data["selected_ids"]
+                select_text = "✅ Seleccionado" if is_selected else "☑️ Seleccionar"
+                new_buttons = [
+                    [
+                        Button.inline(select_text, data=f"toggle_sel_{msg_id}".encode()),
+                        Button.inline("🔄 Mover", data=f"req_mover_{msg_id}".encode()),
+                        Button.inline("🗑️ Eliminar", data=f"req_del_{msg_id}".encode())
+                    ]
+                ]
+                await event.edit(buttons=new_buttons)
+            return
+
+        if data == "batch_move_init":
+            chat_data = user_searches.get(chat_id, {})
+            selected_ids = chat_data.get("selected_ids", [])
+            if not selected_ids:
+                await event.answer("⚠️ No hay archivos seleccionados.", alert=True)
+                return
+            
+            chat_data["batch_mover_ids"] = selected_ids
+            indice = cargar_indice()
+            categorias_validas = {k: v for k, v in indice.items() if v >= 3}
+            
+            botones = [
+                [Button.inline("⌨️ 🔍 Escribir destino manualmente", data=b"bmove_manual")]
+            ]
+            for label, letras in GRUPOS:
+                count = sum(1 for k in categorias_validas if k[0] in letras)
+                if count > 0:
+                    botones.append([Button.inline(f"🔤 Grupo {label}", data=f"bmove_grupo_{label}".encode())])
+            botones.append([Button.inline("❌ Cancelar", data=b"cancel_bmove")])
+
+            await event.edit(
+                f"🔄 **Mover {len(selected_ids)} archivos seleccionados**\n\nElige una opción o escribe directamente el destino:",
+                buttons=botones
+            )
+            return
+
+        if data == "bmove_manual":
+            waiting_batch_manual_move[chat_id] = True
+            await event.edit(
+                "✍️ **Búsqueda manual de destino (Lote)**\n\n"
+                "Por favor, **escribe el nombre de la categoría/carpeta destino** en el chat (ejemplo: `rojo`):"
+            )
+            return
+
+        if data.startswith("bmove_grupo_"):
+            label = data[len("bmove_grupo_"):]
+            letras = next((l for lbl, l in GRUPOS if lbl == label), "")
+            indice = cargar_indice()
+            categorias_validas = {k: v for k, v in indice.items() if v >= 3}
+
+            botones = []
+            for letra in letras:
+                cats = [(k, v) for k, v in categorias_validas.items() if k.startswith(letra)]
+                if len(cats) > 0:
+                    botones.append([Button.inline(f"🔡 {letra.upper()} — {len(cats)} carpetas", data=f"bmove_letra_{letra}|{label}".encode())])
+            botones.append([Button.inline("⬅️ Volver", data=b"back_bmove_grupos")])
+
+            await event.edit(f"🔤 **Grupo {label}** — Elige una letra:", buttons=botones)
+            return
+
+        if data.startswith("bmove_letra_"):
+            partes = data[len("bmove_letra_"):].split("|")
+            letra, label_grupo = partes[0], partes[1]
+            indice = cargar_indice()
+            categorias_validas = {k: v for k, v in indice.items() if v >= 3}
+            filtradas = sorted([(k, v) for k, v in categorias_validas.items() if k.startswith(letra)], key=lambda x: x[0])
+
+            botones = [[Button.inline(f"📁 #{k.capitalize()} ({v:,})", data=f"bmove_target_{k}".encode())] for k, v in filtradas]
+            botones.append([Button.inline("⬅️ Volver", data=f"bmove_grupo_{label_grupo}".encode())])
+
+            for i in range(0, len(botones), 95):
+                await event.edit(f"🔡 **Letra {letra.upper()}** — Selecciona la categoría de destino:", buttons=botones[i:i + 95])
+            return
+
+        if data == "back_bmove_grupos":
+            chat_data = user_searches.get(chat_id, {})
+            selected_ids = chat_data.get("batch_mover_ids", [])
+            indice = cargar_indice()
+            categorias_validas = {k: v for k, v in indice.items() if v >= 3}
+            
+            botones = [
+                [Button.inline("⌨️ 🔍 Escribir destino manualmente", data=b"bmove_manual")]
+            ]
+            for label, letras in GRUPOS:
+                count = sum(1 for k in categorias_validas if k[0] in letras)
+                if count > 0:
+                    botones.append([Button.inline(f"🔤 Grupo {label}", data=f"bmove_grupo_{label}".encode())])
+            botones.append([Button.inline("❌ Cancelar", data=b"cancel_bmove")])
+
+            await event.edit(
+                f"🔄 **Mover {len(selected_ids)} archivos seleccionados**\n\nElige una opción o escribe directamente el destino:",
+                buttons=botones
+            )
+            return
+
+        if data.startswith("bmove_target_"):
+            destino = data[len("bmove_target_"):]
+            chat_data = user_searches.get(chat_id, {})
+            batch_ids = chat_data.get("batch_mover_ids", [])
+
+            if not batch_ids:
+                await event.answer("❌ Error: No se encontraron archivos seleccionados.", alert=True)
+                return
+
+            status_edit = await event.edit(f"⏳ Moviendo {len(batch_ids)} archivos a `#{destino}`...")
+            exitosos = 0
+            indice = cargar_indice()
+            
+            for msg_id in batch_ids:
+                message = await user.get_messages(CHANNEL_ID, ids=msg_id)
+                if message:
+                    old_cats = extraer_categorias(message)
+                    texto_actual = message.text or ""
+                    if f"#{destino}" not in texto_actual.lower():
+                        nuevo_texto = f"{texto_actual}\n#{destino}".strip()
+                    else:
+                        nuevo_texto = texto_actual
+
+                    try:
+                        await user.edit_message(CHANNEL_ID, msg_id, text=nuevo_texto)
+                        exitosos += 1
+                        
+                        if not old_cats:
+                            indice['sin_nombre'] = max(0, indice.get('sin_nombre', 0) - 1)
+                        else:
+                            for c in old_cats:
+                                if c != destino:
+                                    indice[c] = max(0, indice.get(c, 0) - 1)
+                        indice[destino] = indice.get(destino, 0) + 1
+                        
+                        await asyncio.sleep(0.5)
+                    except Exception:
+                        pass
+
+            guardar_indice(indice)
+            chat_data["selected_ids"] = []
+            chat_data["batch_mover_ids"] = []
+
+            await status_edit.edit(f"✅ **¡{exitosos} archivos movidos con éxito a `#{destino}`!**")
+            return
+
+        if data == "cancel_bmove":
+            await event.edit("❌ Operación de movimiento múltiple cancelada.")
+            return
 
         if data.startswith("del_cat_"):
             cat_a_borrar = data.replace("del_cat_", "").lower().strip()
@@ -557,15 +784,19 @@ async def main():
                 async for message in user.iter_messages(CHANNEL_ID, limit=5000):
                     if (message.photo or message.video or message.document) and not extraer_categorias(message):
                         all_ids.append(message.id)
-                        if message.photo: photos.append(message.id)
-                        elif message.video: videos.append(message.id)
+                        if message.photo: 
+                            photos.append(message.id)
+                        elif message.video: 
+                            videos.append(message.id)
                         elif message.document:
                             is_gif = False
                             if message.file and message.file.name and message.file.name.lower().endswith('.gif'):
                                 is_gif = True
                             elif message.file and message.file.mime_type == 'image/gif':
                                 is_gif = True
-                            if is_gif: gifs.append(message.id)
+                            
+                            if is_gif: 
+                                gifs.append(message.id)
                             
                         if len(all_ids) >= 200: break
                 display_query = "Sin nombre"
@@ -591,7 +822,8 @@ async def main():
 
             user_searches[chat_id] = {
                 "all_ids": all_ids, "photos": photos, "videos": videos, "gifs": gifs,
-                "page": 0, "filter": "all", "query": display_query, "origen": "menu"
+                "page": 0, "filter": "all", "query": display_query, "origen": "menu",
+                "selected_ids": []
             }
             await status_msg.delete()
             await send_page(chat_id)
@@ -611,8 +843,11 @@ async def main():
 
         elif data.startswith("cancel_del_"):
             msg_id = int(data.replace("cancel_del_", ""))
+            is_selected = msg_id in user_searches.get(chat_id, {}).get("selected_ids", [])
+            select_text = "✅ Seleccionado" if is_selected else "☑️ Seleccionar"
             botones_acciones = [
                 [
+                    Button.inline(select_text, data=f"toggle_sel_{msg_id}".encode()),
                     Button.inline("🔄 Mover", data=f"req_mover_{msg_id}".encode()),
                     Button.inline("🗑️ Eliminar", data=f"req_del_{msg_id}".encode())
                 ]
@@ -625,7 +860,19 @@ async def main():
         elif data.startswith("del_"):
             msg_id = int(data.replace("del_", ""))
             try:
+                message = await user.get_messages(CHANNEL_ID, ids=msg_id)
+                old_cats = extraer_categorias(message) if message else []
+
                 await user.delete_messages(CHANNEL_ID, [msg_id])
+
+                indice = cargar_indice()
+                if not old_cats:
+                    indice['sin_nombre'] = max(0, indice.get('sin_nombre', 0) - 1)
+                else:
+                    for c in old_cats:
+                        indice[c] = max(0, indice.get(c, 0) - 1)
+                guardar_indice(indice)
+
                 await event.answer("🗑️ Archivo eliminado del canal exitosamente.", alert=True)
                 await event.edit(text="🗑️ *[Archivo eliminado]*", buttons=None)
             except Exception as e:
@@ -721,6 +968,7 @@ async def main():
 
             message = await user.get_messages(CHANNEL_ID, ids=msg_id)
             if message:
+                old_cats = extraer_categorias(message)
                 texto_actual = message.text or ""
                 if f"#{destino}" not in texto_actual.lower():
                     nuevo_texto = f"{texto_actual}\n#{destino}".strip()
@@ -729,6 +977,16 @@ async def main():
 
                 try:
                     await user.edit_message(CHANNEL_ID, msg_id, text=nuevo_texto)
+                    indice = cargar_indice()
+                    if not old_cats:
+                        indice['sin_nombre'] = max(0, indice.get('sin_nombre', 0) - 1)
+                    else:
+                        for c in old_cats:
+                            if c != destino:
+                                indice[c] = max(0, indice.get(c, 0) - 1)
+                    indice[destino] = indice.get(destino, 0) + 1
+                    guardar_indice(indice)
+
                     await event.edit(f"✅ **¡Archivo movido con éxito!**\nSe le añadió la etiqueta `#{destino}` (ID: `{msg_id}`).")
                 except Exception as e:
                     await event.edit(f"❌ Error al editar el mensaje en Telegram: {str(e)}")
@@ -744,17 +1002,29 @@ async def main():
             await event.edit("⏳ Moviendo todos los archivos en lote...")
             origen, destino = info["origen_mov"], info["destino_mov"]
             count = 0
+            indice = cargar_indice()
 
             for msg_id in info["mover_ids"]:
                 message = await user.get_messages(CHANNEL_ID, ids=msg_id)
                 if message:
+                    old_cats = extraer_categorias(message)
                     texto_actual = message.text or ""
                     nuevo_texto = re.sub(rf'#{re.escape(origen)}\b', f'#{destino}', texto_actual, flags=re.IGNORECASE)
                     if nuevo_texto != texto_actual:
                         await user.edit_message(CHANNEL_ID, msg_id, text=nuevo_texto)
                         count += 1
+                        
+                        if not old_cats:
+                            indice['sin_nombre'] = max(0, indice.get('sin_nombre', 0) - 1)
+                        else:
+                            for c in old_cats:
+                                if c != destino:
+                                    indice[c] = max(0, indice.get(c, 0) - 1)
+                        indice[destino] = indice.get(destino, 0) + 1
+                        
                         await asyncio.sleep(1)
 
+            guardar_indice(indice)
             await event.edit(f"✅ Se movieron **{count}** archivos de `#{origen}` a `#{destino}`.")
 
         elif data == "mover_modo_indiv":
@@ -768,6 +1038,7 @@ async def main():
                 origen, destino = info["origen_mov"], info["destino_mov"]
                 message = await user.get_messages(CHANNEL_ID, ids=msg_id)
                 if message:
+                    old_cats = extraer_categorias(message)
                     texto_actual = message.text or ""
                     nuevo_texto = re.sub(rf'#{re.escape(origen)}\b', f'#{destino}', texto_actual, flags=re.IGNORECASE)
                     if nuevo_texto == texto_actual and origen in texto_actual.lower():
@@ -775,6 +1046,16 @@ async def main():
 
                     try:
                         await user.edit_message(CHANNEL_ID, msg_id, text=nuevo_texto)
+                        indice = cargar_indice()
+                        if not old_cats:
+                            indice['sin_nombre'] = max(0, indice.get('sin_nombre', 0) - 1)
+                        else:
+                            for c in old_cats:
+                                if c != destino:
+                                    indice[c] = max(0, indice.get(c, 0) - 1)
+                        indice[destino] = indice.get(destino, 0) + 1
+                        guardar_indice(indice)
+
                         await event.answer("✅ Movido y limpiado de ubicación anterior")
                     except Exception:
                         await event.answer("❌ Error")
