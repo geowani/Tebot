@@ -1107,10 +1107,16 @@ async def main():
                 await event.delete()
                 await mostrar_archivo_para_mover(chat_id)
 
+    @user.on(events.MessageEdited(chats=CHANNEL_ID))
+    async def ignore_edits(event):
+        # Capturamos explícitamente cualquier evento de edición para asegurarnos 
+        # de que NO sea procesado por el listener de mensajes nuevos.
+        return
+
     @user.on(events.NewMessage(chats=CHANNEL_ID))
     async def auto_update_index(event):
-        # Ignorar mensajes editados para evitar bucles infinitos al cambiar etiquetas
-        if event.message.edit_date:
+        # Doble verificación estricta: Si el evento tiene fecha de edición o bandera de edición, descartarlo por completo.
+        if getattr(event.message, 'edit_date', None) is not None:
             return
             
         cats = extraer_categorias(event.message)
