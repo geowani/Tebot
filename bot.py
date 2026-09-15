@@ -134,7 +134,16 @@ async def main():
         current_ids = current_list[start:end]
         
         if not current_ids:
-            await bot.send_message(chat_id, f"No hay archivos para este filtro en '{query}'.")
+            # 🟢 NUEVO: Si no se encuentra nada o está vacía, mostramos opción de borrar del índice
+            botones_vacio = [
+                [Button.inline(f"🗑️ Eliminar '{query}' del índice", data=f"del_cat_{query}".encode())],
+                [Button.inline("⬅️ Volver al menú", data="volver_menu".encode())]
+            ]
+            await bot.send_message(
+                chat_id, 
+                f"❌ No hay archivos para este filtro en '{query}'.\nPuedes eliminar esta categoría del índice aquí:", 
+                buttons=botones_vacio
+            )
             return
 
         for msg_id in current_ids:
@@ -379,7 +388,15 @@ async def main():
                     videos.append(message.id)
 
         if not all_ids:
-            await status_msg.edit(f"No se encontraron archivos para '{query}'.")
+            # 🟢 NUEVO: Si no se encuentra nada con texto directo, también damos opción de borrar si existía en el índice
+            query_limpia = query.lower().replace('#', '').strip()
+            indice = cargar_indice()
+            
+            botones_vacio = [Button.inline("⬅️ Volver al menú", data="volver_menu".encode())]
+            if query_limpia in indice:
+                botones_vacio.insert(0, Button.inline(f"🗑️ Eliminar '{query_limpia}' del índice", data=f"del_cat_{query_limpia}".encode()))
+
+            await status_msg.edit(f"No se encontraron archivos para '{query}'.", buttons=botones_vacio)
             return
 
         user_searches[event.chat_id] = {
@@ -448,6 +465,20 @@ async def main():
     async def callback_handler(event):
         data = event.data.decode('utf-8')
         chat_id = event.chat_id
+
+        # 🟢 NUEVO: Manejador del botón para eliminar del índice cuando sale vacío
+        if data.startswith("del_cat_"):
+            cat_a_borrar = data.replace("del_cat_", "").lower().strip()
+            indice = cargar_indice()
+            
+            if cat_a_borrar in indice:
+                del indice[cat_a_borrar]
+                guardar_indice(indice)
+                await event.edit(f"🗑️ La categoría `#{cat_a_borrar}` ha sido eliminada del índice correctamente y ya no aparecerá en el menú.")
+            else:
+                await event.answer(f"La categoría '{cat_a_borrar}' ya no estaba en el índice.", alert=True)
+                await event.delete()
+            return
 
         if data == "next_page":
             if chat_id in user_searches:
