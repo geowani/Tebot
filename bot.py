@@ -3,10 +3,27 @@ import logging
 import asyncio
 import json
 import re
+import threading
+from flask import Flask
 from telethon import TelegramClient, events, Button
+from telethon.sessions import StringSession
 from dotenv import load_dotenv
 
-# Configurar logging
+# --- SERVIDOR WEB PARA MANTENER ACTIVO EL WEB SERVICE EN RENDER ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "¡Bot activo y funcionando 24/7 en Render!"
+
+def run_flask():
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
+
+# Iniciar el servidor web en un hilo independiente
+threading.Thread(target=run_flask, daemon=True).start()
+
+# --- CONFIGURACIÓN DE TELEGRAM Y TELETHON ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -16,6 +33,7 @@ API_ID = os.getenv('API_ID')
 API_HASH = os.getenv('API_HASH')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHANNEL_ID = os.getenv('CHANNEL_ID') 
+USER_SESSION_STRING = os.getenv('USER_SESSION_STRING')
 
 try:
     CHANNEL_ID = int(CHANNEL_ID)
@@ -89,8 +107,8 @@ def extraer_categorias(message):
 async def main():
     print("Iniciando conexión...")
     
-    bot = TelegramClient('bot_session', API_ID, API_HASH)
-    user = TelegramClient('user_session', API_ID, API_HASH)
+    bot = TelegramClient('bot_session', int(API_ID), API_HASH)
+    user = TelegramClient(StringSession(USER_SESSION_STRING), int(API_ID), API_HASH)
     
     await bot.start(bot_token=BOT_TOKEN)
     await user.start()
@@ -105,7 +123,6 @@ async def main():
         page = data["page"]
         ids = data["ids"]
         query = data["query"]
-        # origen: 'menu' o 'grupo_A-C' etc., para saber a dónde regresa el botón volver
         origen = data.get("origen", "menu")
         
         start = page * 5
@@ -118,12 +135,10 @@ async def main():
             await bot.send_message(chat_id, "Error al reenviar los archivos.")
             return
         
-        # Construir fila de botones
         fila_nav = []
         if end < len(ids):
             fila_nav.append(Button.inline("➡️ Más archivos", data=b"next_page"))
         
-        # Botón volver: regresa al grupo o al menú principal
         fila_nav.append(Button.inline("⬅️ Volver", data=f"volver_{origen}".encode()))
 
         msg_text = f"📄 Mostrando archivos {start+1} a {min(end, len(ids))} de **{len(ids)}** encontrados para '{query}'."
@@ -156,17 +171,14 @@ async def main():
                 if count % 10000 == 0:
                     await status.edit(f"⏳ Escaneando... {count} mensajes revisados...")
                 
-                # Solo procesar mensajes con multimedia
                 if not (message.photo or message.video or message.document):
                     continue
 
-                # Obtener TODAS las palabras del archivo
                 cats = extraer_categorias(message)
                 if cats:
                     for cat in cats:
                         indice[cat] = indice.get(cat, 0) + 1
                 else:
-                    # Archivo sin ningún nombre reconocible → carpeta especial
                     indice['sin_nombre'] = indice.get('sin_nombre', 0) + 1
             
             guardar_indice(indice)
@@ -187,7 +199,6 @@ async def main():
             await mostrar_menu_principal(event.chat_id, indice)
             return
 
-        # Comando para mover archivos: /mover origen destino
         if texto.startswith('/mover'):
             partes = event.raw_text.split()
             if len(partes) < 3:
@@ -206,32 +217,27 @@ async def main():
 
                 texto_actual = message.text or ""
                 
-                # Buscar el hashtag o palabra exacta y reemplazarla
                 nuevo_texto = re.sub(rf'#{re.escape(origen)}\b', f'#{destino}', texto_actual, flags=re.IGNORECASE)
                 
                 if nuevo_texto == texto_actual and origen in texto_actual.lower():
                     nuevo_texto = re.sub(rf'\b{re.escape(origen)}\b', destino, texto_actual, flags=re.IGNORECASE)
 
-                # Si hubo cambios en el texto, editar el mensaje en Telegram
                 if nuevo_texto != texto_actual:
                     try:
                         await user.edit_message(CHANNEL_ID, message.id, text=nuevo_texto)
                         count += 1
-                        await asyncio.sleep(1) # Pausa de 1 seg para evitar límites de rate de Telegram
+                        await asyncio.sleep(1)
                     except Exception as e:
                         logger.error(f"Error editando mensaje {message.id}: {e}")
 
             if count > 0:
-                # Actualizar el índice local (JSON)
                 indice = cargar_indice()
                 
-                # Restar o eliminar la categoría antigua
                 if origen in indice:
                     indice[origen] = max(0, indice[origen] - count)
                     if indice[origen] == 0:
                         del indice[origen]
 
-                # Sumar a la categoría nueva
                 indice[destino] = indice.get(destino, 0) + count
                 guardar_indice(indice)
 
@@ -240,7 +246,6 @@ async def main():
                 await status.edit(f"❌ No se encontraron mensajes con la etiqueta `#{origen}` para modificar.")
             return
 
-        # Si no es un comando, es una búsqueda normal
         query = event.raw_text
         status_msg = await event.reply(f"🔍 Buscando '{query}'...")
         try:
@@ -257,7 +262,6 @@ async def main():
         except Exception as e:
             await status_msg.edit("Hubo un error al buscar.")
 
-    # --- GRUPOS DE LETRAS ---
     GRUPOS = [
         ("A-C", "abc"),
         ("D-F", "def"),
@@ -267,7 +271,7 @@ async def main():
         ("P-R", "pqr"),
         ("S-U", "stu"),
         ("V-Z", "vwxyz"),
-        ("📂 Sin nombre / Otros", ""),  # archivos sin categoría detectada
+        ("📂 Sin nombre / Otros", ""),
     ]
 
     async def mostrar_menu_principal(chat_id, indice=None):
@@ -280,7 +284,6 @@ async def main():
             if letras:
                 count = sum(1 for k in categorias_validas if k[0] in letras)
             else:
-                # Incluir sin_nombre y cualquier otro que empiece con carácter no-letra
                 count = sum(1 for k in categorias_validas if not k[0].isalpha())
             if count > 0:
                 botones.append([Button.inline(f"🔤 {label}  ({count} nombres)", data=f"grupo_{label}".encode())])
@@ -297,18 +300,15 @@ async def main():
         )
 
     async def mostrar_grupo(chat_id, label, letras):
-        """Nivel 2: muestra botones de letra individual dentro del grupo (A, B, C...)"""
         indice = cargar_indice()
         categorias_validas = {k: v for k, v in indice.items() if v >= 3}
 
         if not letras:
-            # Caso especial "Sin nombre / Otros" → va directo al nivel 3
             await mostrar_letra(chat_id, "", label, letras)
             return
 
         botones = []
         for letra in letras:
-            # Contar cuántas carpetas empiezan con esta letra
             cats = [(k, v) for k, v in categorias_validas.items() if k.startswith(letra)]
             count_cats = len(cats)
             count_files = sum(v for _, v in cats)
@@ -330,7 +330,6 @@ async def main():
         )
 
     async def mostrar_letra(chat_id, letra, label_grupo, letras_grupo):
-        """Nivel 3: muestra las carpetas que empiezan con esa letra"""
         indice = cargar_indice()
         categorias_validas = {k: v for k, v in indice.items() if v >= 3}
 
@@ -340,7 +339,6 @@ async def main():
             header = f"🔡 **Letra {letra.upper()}** — {len(filtradas)} carpetas\nElige una:"
             volver_data = f"volver_grupo_{label_grupo}".encode()
         else:
-            # Caso "Sin nombre / Otros"
             filtradas = [(k, v) for k, v in categorias_validas.items() if not k[0].isalpha()]
             filtradas = sorted(filtradas, key=lambda x: (x[0] != 'sin_nombre', x[0]))
             header = f"📂 **Sin nombre / Otros** — {len(filtradas)} categorías\nElige una:"
@@ -377,8 +375,6 @@ async def main():
                 await event.answer("Búsqueda expirada.")
 
         elif data.startswith("volver_"):
-            # volver_menu -> menú principal
-            # volver_grupo_S-U -> grupo S-U
             destino = data[len("volver_"):]
             await event.delete()
             if destino == "menu":
@@ -397,7 +393,6 @@ async def main():
             await mostrar_grupo(chat_id, label, letras)
 
         elif data.startswith("letra_"):
-            # formato: letra_a|A-C|abc
             partes = data[len("letra_"):].split("|")
             letra = partes[0]
             label_grupo = partes[1] if len(partes) > 1 else ""
@@ -416,7 +411,6 @@ async def main():
 
             await event.delete()
 
-            # Caso especial: "sin_nombre" no se puede buscar con el motor de Telegram
             if query == "sin_nombre":
                 status_msg = await bot.send_message(chat_id, "🔍 Buscando archivos sin nombre (esto puede tardar un poco)...")
                 ids = []
@@ -443,7 +437,6 @@ async def main():
             user_searches[chat_id] = {"ids": ids, "page": 0, "query": display_query, "origen": origen_grupo}
             await status_msg.edit(f"✅ Encontré **{len(ids)}** archivos para '{display_query}'. Enviando los primeros 5:")
             await send_page(chat_id)
-
 
     @user.on(events.NewMessage(chats=CHANNEL_ID))
     async def auto_update_index(event):
