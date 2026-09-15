@@ -133,7 +133,6 @@ async def main():
             await bot.send_message(chat_id, f"No hay archivos para este filtro en '{query}'.")
             return
 
-        # Enviar cada archivo individualmente acompañado de sus botones de gestión (Mover y Eliminar)
         for msg_id in current_ids:
             try:
                 botones_acciones = [
@@ -473,9 +472,104 @@ async def main():
             except Exception as e:
                 await event.answer(f"❌ Error al eliminar: {str(e)}", alert=True)
 
+        # --- SUBMENÚ INTERACTIVO PARA MOVER UN SOLO ARCHIVO ---
         elif data.startswith("req_mover_"):
             msg_id = int(data.replace("req_mover_", ""))
-            await event.answer("ℹ️ Para mover este archivo específico, usa el comando de texto: `/mover categoria_actual nueva_categoria`", alert=True)
+            if chat_id not in user_searches:
+                user_searches[chat_id] = {}
+            user_searches[chat_id]["single_mover_id"] = msg_id
+
+            indice = cargar_indice()
+            categorias_validas = {k: v for k, v in indice.items() if v >= 3}
+            
+            botones = []
+            for label, letras in GRUPOS:
+                count = sum(1 for k in categorias_validas if k[0] in letras)
+                if count > 0:
+                    botones.append([Button.inline(f"🔤 Grupo {label}", data=f"smove_grupo_{label}".encode())])
+            botones.append([Button.inline("❌ Cancelar", data=b"cancel_smove")])
+
+            await event.edit(
+                f"🔄 **Mover archivo (ID: `{msg_id}`)**\n\nElige el **grupo** de la categoría de destino:",
+                buttons=botones
+            )
+
+        elif data.startswith("smove_grupo_"):
+            label = data[len("smove_grupo_"):]
+            letras = next((l for lbl, l in GRUPOS if lbl == label), "")
+            indice = cargar_indice()
+            categorias_validas = {k: v for k, v in indice.items() if v >= 3}
+
+            botones = []
+            for letra in letras:
+                cats = [(k, v) for k, v in categorias_validas.items() if k.startswith(letra)]
+                if len(cats) > 0:
+                    botones.append([Button.inline(f"🔡 {letra.upper()} — {len(cats)} carpetas", data=f"smove_letra_{letra}|{label}".encode())])
+            botones.append([Button.inline("⬅️ Volver", data=b"back_smove_grupos")])
+
+            await event.edit(f"🔤 **Grupo {label}** — Elige una letra:", buttons=botones)
+
+        elif data.startswith("smove_letra_"):
+            partes = data[len("smove_letra_"):].split("|")
+            letra, label_grupo = partes[0], partes[1]
+            indice = cargar_indice()
+            categorias_validas = {k: v for k, v in indice.items() if v >= 3}
+            filtradas = sorted([(k, v) for k, v in categorias_validas.items() if k.startswith(letra)], key=lambda x: x[0])
+
+            botones = [[Button.inline(f"📁 #{k.capitalize()} ({v:,})", data=f"smove_target_{k}".encode())] for k, v in filtradas]
+            botones.append([Button.inline("⬅️ Volver", data=f"smove_grupo_{label_grupo}".encode())])
+
+            for i in range(0, len(botones), 95):
+                await event.edit(f"🔡 **Letra {letra.upper()}** — Selecciona la categoría de destino:", buttons=botones[i:i + 95])
+
+        elif data == "back_smove_grupos":
+            chat_data = user_searches.get(chat_id, {})
+            msg_id = chat_data.get("single_mover_id")
+            indice = cargar_indice()
+            categorias_validas = {k: v for k, v in indice.items() if v >= 3}
+            
+            botones = []
+            for label, letras in GRUPOS:
+                count = sum(1 for k in categorias_validas if k[0] in letras)
+                if count > 0:
+                    botones.append([Button.inline(f"🔤 Grupo {label}", data=f"smove_grupo_{label}".encode())])
+            botones.append([Button.inline("❌ Cancelar", data=b"cancel_smove")])
+
+            await event.edit(
+                f"🔄 **Mover archivo (ID: `{msg_id}`)**\n\nElige el **grupo** de la categoría de destino:",
+                buttons=botones
+            )
+
+        elif data.startswith("smove_target_"):
+            destino = data[len("smove_target_"):]
+            chat_data = user_searches.get(chat_id, {})
+            msg_id = chat_data.get("single_mover_id")
+
+            if not msg_id:
+                await event.answer("❌ Error: No se encontró el ID del archivo.", alert=True)
+                return
+
+            message = await user.get_messages(CHANNEL_ID, ids=msg_id)
+            if message:
+                texto_actual = message.text or ""
+                # Si ya tiene hashtags, añadimos el nuevo o reemplazamos
+                if f"#{destino}" not in texto_actual.lower():
+                    nuevo_texto = f"{texto_actual}\n#{destino}".strip()
+                else:
+                    nuevo_texto = texto_actual
+
+                try:
+                    await user.edit_message(CHANNEL_ID, msg_id, text=nuevo_texto)
+                    await event.edit(f"✅ **¡Archivo movido con éxito!**\nSe le añadió la etiqueta `#{destino}` (ID: `{msg_id}`).")
+                except Exception as e:
+                    await event.edit(f"❌ Error al editar el mensaje en Telegram: {str(e)}")
+            else:
+                await event.edit("❌ No se pudo encontrar el mensaje original en el canal.")
+
+        elif data == "cancel_smove":
+            await event.edit("❌ Operación de movimiento cancelada.")
+
+        # --- FIN DEL SUBMENÚ ---
 
         elif data == "mover_modo_todos":
             info = user_searches.get(chat_id)
