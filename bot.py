@@ -1086,9 +1086,9 @@ async def main():
                         if not old_cats:
                             indice['sin_nombre'] = max(0, indice.get('sin_nombre', 0) - 1)
                         else:
-                        for c in old_cats:
-                            if c != destino:
-                                indice[c] = max(0, indice.get(c, 0) - 1)
+                            for c in old_cats:
+                                if c != destino:
+                                    indice[c] = max(0, indice.get(c, 0) - 1)
                         indice[destino] = indice.get(destino, 0) + 1
                         guardar_indice(indice)
 
