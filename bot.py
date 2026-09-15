@@ -209,10 +209,10 @@ async def main():
             indice = {}
             procesados = 0
 
-            try:
-                async for message in user.iter_messages(CHANNEL_ID):
-                    procesados += 1
+            async for message in user.iter_messages(CHANNEL_ID):
+                procesados += 1
 
+                try:
                     if message.photo or message.video or message.document:
                         cats = extraer_categorias(message)
                         if cats:
@@ -221,9 +221,8 @@ async def main():
                         else:
                             indice['sin_nombre'] = indice.get('sin_nombre', 0) + 1
 
-                    # Libera el event loop para no congelar el servidor ni tumbar la app
-                    if procesados % 100 == 0:
-                        await asyncio.sleep(0.001)
+                    # Pausa constante para mantener la estabilidad de la conexión
+                    await asyncio.sleep(0.005)
 
                     # Actualizar el progreso cada 2,500 mensajes o al llegar al final
                     if procesados % 2500 == 0 or procesados == total_mensajes:
@@ -236,11 +235,17 @@ async def main():
                                 f"📊 Procesados: **{procesados:,} / {total_mensajes:,}** msgs"
                             )
                         except Exception:
-                            pass # Evita errores por limites de edición de Telegram
+                            pass # Evita errores de frecuencia de edición en Telegram
 
-            except FloodWaitError as e:
-                logger.warning(f"FloodWait de Telegram alcanzado. Esperando {e.seconds} segundos...")
-                await asyncio.sleep(e.seconds)
+                except FloodWaitError as e:
+                    logger.warning(f"FloodWait de Telegram alcanzado. Esperando {e.seconds} segundos...")
+                    try:
+                        await status.edit(f"⏳ **Pausa de {e.seconds}s requerida por Telegram... reanudando automáticamente.**")
+                    except Exception:
+                        pass
+                    await asyncio.sleep(e.seconds)
+                except Exception as e:
+                    logger.error(f"Error procesando mensaje: {e}")
 
             guardar_indice(indice)
             await status.edit(
