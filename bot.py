@@ -7,6 +7,7 @@ import threading
 from flask import Flask
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
+from telethon.errors import FloodWaitError
 from dotenv import load_dotenv
 
 # --- SERVIDOR WEB EN RENDER ---
@@ -207,33 +208,40 @@ async def main():
             
             indice = {}
             procesados = 0
-            ultimo_porcentaje = -1
 
-            async for message in user.iter_messages(CHANNEL_ID):
-                procesados += 1
-                porcentaje = int((procesados / total_mensajes) * 100)
+            try:
+                async for message in user.iter_messages(CHANNEL_ID):
+                    procesados += 1
 
-                if message.photo or message.video or message.document:
-                    cats = extraer_categorias(message)
-                    if cats:
-                        for cat in cats:
-                            indice[cat] = indice.get(cat, 0) + 1
-                    else:
-                        indice['sin_nombre'] = indice.get('sin_nombre', 0) + 1
+                    if message.photo or message.video or message.document:
+                        cats = extraer_categorias(message)
+                        if cats:
+                            for cat in cats:
+                                indice[cat] = indice.get(cat, 0) + 1
+                        else:
+                            indice['sin_nombre'] = indice.get('sin_nombre', 0) + 1
 
-                # Actualizar el mensaje de estado cada 5% procesado
-                if porcentaje != ultimo_porcentaje and porcentaje % 5 == 0:
-                    ultimo_porcentaje = porcentaje
-                    barra = crear_barra_progreso(porcentaje)
-                    try:
-                        await status.edit(
-                            f"⏳ **Indexando canal...**\n\n"
-                            f"`[{barra}]` **{porcentaje}%**\n"
-                            f"📊 Procesados: **{procesados:,} / {total_mensajes:,}** msgs"
-                        )
-                    except Exception:
-                        pass
-            
+                    # Libera el event loop para no congelar el servidor ni tumbar la app
+                    if procesados % 100 == 0:
+                        await asyncio.sleep(0.001)
+
+                    # Actualizar el progreso cada 2,500 mensajes o al llegar al final
+                    if procesados % 2500 == 0 or procesados == total_mensajes:
+                        porcentaje = int((procesados / total_mensajes) * 100)
+                        barra = crear_barra_progreso(porcentaje)
+                        try:
+                            await status.edit(
+                                f"⏳ **Indexando canal...**\n\n"
+                                f"`[{barra}]` **{porcentaje}%**\n"
+                                f"📊 Procesados: **{procesados:,} / {total_mensajes:,}** msgs"
+                            )
+                        except Exception:
+                            pass # Evita errores por limites de edición de Telegram
+
+            except FloodWaitError as e:
+                logger.warning(f"FloodWait de Telegram alcanzado. Esperando {e.seconds} segundos...")
+                await asyncio.sleep(e.seconds)
+
             guardar_indice(indice)
             await status.edit(
                 f"✅ **¡Índice creado con éxito!**\n\n"
