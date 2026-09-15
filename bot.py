@@ -37,6 +37,7 @@ USER_SESSION_STRING = os.getenv('USER_SESSION_STRING')
 
 try:
     CHANNEL_ID = int(CHANNEL_ID)
+    API_ID = int(API_ID)
 except ValueError:
     pass
 
@@ -45,12 +46,12 @@ INDEX_FILE = 'indice_categorias.json'
 
 def cargar_indice():
     if os.path.exists(INDEX_FILE):
-        with open(INDEX_FILE, 'r') as f:
+        with open(INDEX_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
     return {}
 
 def guardar_indice(datos):
-    with open(INDEX_FILE, 'w') as f:
+    with open(INDEX_FILE, 'w', encoding='utf-8') as f:
         json.dump(datos, f, indent=4)
 
 def extraer_categorias(message):
@@ -132,11 +133,19 @@ async def main():
             await bot.send_message(chat_id, f"No hay archivos para este filtro en '{query}'.")
             return
 
-        try:
-            await bot.forward_messages(chat_id, current_ids, from_peer=CHANNEL_ID)
-        except Exception:
-            await bot.send_message(chat_id, "Error al reenviar los archivos.")
-            return
+        # Enviar cada archivo individualmente acompañado de sus botones de gestión (Mover y Eliminar)
+        for msg_id in current_ids:
+            try:
+                botones_acciones = [
+                    [
+                        Button.inline("🔄 Mover", data=f"req_mover_{msg_id}".encode()),
+                        Button.inline("🗑️ Eliminar", data=f"del_{msg_id}".encode())
+                    ]
+                ]
+                await bot.forward_messages(chat_id, msg_id, from_peer=CHANNEL_ID)
+                await bot.send_message(chat_id, f"🛠️ Opciones para el archivo (ID: `{msg_id}`):", buttons=botones_acciones)
+            except Exception:
+                pass
         
         botones = []
         filtros_row = []
@@ -454,6 +463,19 @@ async def main():
             }
             await status_msg.delete()
             await send_page(chat_id)
+
+        elif data.startswith("del_"):
+            msg_id = int(data.replace("del_", ""))
+            try:
+                await user.delete_messages(CHANNEL_ID, [msg_id])
+                await event.answer("🗑️ Archivo eliminado del canal exitosamente.", alert=True)
+                await event.edit(text="🗑️ *[Archivo eliminado]*", buttons=None)
+            except Exception as e:
+                await event.answer(f"❌ Error al eliminar: {str(e)}", alert=True)
+
+        elif data.startswith("req_mover_"):
+            msg_id = int(data.replace("req_mover_", ""))
+            await event.answer("ℹ️ Para mover este archivo específico, usa el comando de texto: `/mover categoria_actual nueva_categoria`", alert=True)
 
         elif data == "mover_modo_todos":
             info = user_searches.get(chat_id)
