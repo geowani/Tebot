@@ -202,30 +202,39 @@ async def main():
         if texto == '/crear_indice':
             status = await event.reply("⏳ Calculando total de mensajes...")
             
-            # Obtener el número total de mensajes en el canal
             res_total = await user.get_messages(CHANNEL_ID, limit=0)
             total_mensajes = res_total.total or 1
             
             indice = {}
             procesados = 0
+            offset_id = 0
 
-            async for message in user.iter_messages(CHANNEL_ID):
-                procesados += 1
-
+            while procesados < total_mensajes:
                 try:
-                    if message.photo or message.video or message.document:
-                        cats = extraer_categorias(message)
-                        if cats:
-                            for cat in cats:
-                                indice[cat] = indice.get(cat, 0) + 1
-                        else:
-                            indice['sin_nombre'] = indice.get('sin_nombre', 0) + 1
+                    mensajes = await user.get_messages(
+                        CHANNEL_ID, 
+                        limit=100, 
+                        offset_id=offset_id
+                    )
 
-                    # Pausa constante para mantener la estabilidad de la conexión
-                    await asyncio.sleep(0.005)
+                    if not mensajes:
+                        break
 
-                    # Actualizar el progreso cada 2,500 mensajes o al llegar al final
-                    if procesados % 2500 == 0 or procesados == total_mensajes:
+                    for message in mensajes:
+                        procesados += 1
+                        offset_id = message.id
+
+                        if message.photo or message.video or message.document:
+                            cats = extraer_categorias(message)
+                            if cats:
+                                for cat in cats:
+                                    indice[cat] = indice.get(cat, 0) + 1
+                            else:
+                                indice['sin_nombre'] = indice.get('sin_nombre', 0) + 1
+
+                    await asyncio.sleep(0.05)
+
+                    if procesados % 2500 == 0 or procesados >= total_mensajes:
                         porcentaje = int((procesados / total_mensajes) * 100)
                         barra = crear_barra_progreso(porcentaje)
                         try:
@@ -235,17 +244,14 @@ async def main():
                                 f"📊 Procesados: **{procesados:,} / {total_mensajes:,}** msgs"
                             )
                         except Exception:
-                            pass # Evita errores de frecuencia de edición en Telegram
+                            pass
 
                 except FloodWaitError as e:
-                    logger.warning(f"FloodWait de Telegram alcanzado. Esperando {e.seconds} segundos...")
-                    try:
-                        await status.edit(f"⏳ **Pausa de {e.seconds}s requerida por Telegram... reanudando automáticamente.**")
-                    except Exception:
-                        pass
-                    await asyncio.sleep(e.seconds)
+                    logger.warning(f"Telegram forzó pausa por FloodWait: {e.seconds}s")
+                    await asyncio.sleep(e.seconds + 1)
                 except Exception as e:
-                    logger.error(f"Error procesando mensaje: {e}")
+                    logger.error(f"Error en bucle de indexación: {e}")
+                    await asyncio.sleep(2)
 
             guardar_indice(indice)
             await status.edit(
@@ -301,7 +307,6 @@ async def main():
             )
             return
 
-        # Búsqueda libre
         query = event.raw_text
         status_msg = await event.reply(f"🔍 Buscando '{query}'...")
         all_ids, photos, videos = [], [], []
