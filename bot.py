@@ -114,6 +114,10 @@ async def main():
     await bot.start(bot_token=BOT_TOKEN)
     await user.start()
 
+    # Obtenemos el ID numérico del usuario de la sesión para aislar eventos propios
+    me_user = await user.get_me()
+    USER_ID = me_user.id
+
     async def send_page(chat_id):
         data = user_searches.get(chat_id)
         if not data: return
@@ -1107,15 +1111,17 @@ async def main():
                 await event.delete()
                 await mostrar_archivo_para_mover(chat_id)
 
-    @user.on(events.MessageEdited(chats=CHANNEL_ID))
-    async def ignore_edits(event):
-        # Capturamos explícitamente cualquier evento de edición para asegurarnos 
-        # de que NO sea procesado por el listener de mensajes nuevos.
-        return
-
+    # CORRECCIÓN DEFINITIVA DEL BUCLE:
+    # Este filtro restringe que auto_update_index SOLAMENTE escuche mensajes nuevos 
+    # que se publiquen de forma nativa en el canal. Descarta de inmediato cualquier 
+    # reenvío, edición o mensaje que no provenga directamente del canal indexado.
     @user.on(events.NewMessage(chats=CHANNEL_ID))
     async def auto_update_index(event):
-        # Doble verificación estricta: Si el evento tiene fecha de edición o bandera de edición, descartarlo por completo.
+        # 1. Si el mensaje es un reenvío (forward), lo ignoramos para que no indexe duplicados al navegar/mover.
+        if event.message.forward:
+            return
+        
+        # 2. Si tiene fecha de edición, lo descartamos.
         if getattr(event.message, 'edit_date', None) is not None:
             return
             
