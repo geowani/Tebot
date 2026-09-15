@@ -138,7 +138,7 @@ async def main():
                 botones_acciones = [
                     [
                         Button.inline("🔄 Mover", data=f"req_mover_{msg_id}".encode()),
-                        Button.inline("🗑️ Eliminar", data=f"del_{msg_id}".encode())
+                        Button.inline("🗑️ Eliminar", data=f"req_del_{msg_id}".encode())
                     ]
                 ]
                 await bot.forward_messages(chat_id, msg_id, from_peer=CHANNEL_ID)
@@ -463,6 +463,33 @@ async def main():
             await status_msg.delete()
             await send_page(chat_id)
 
+        # --- SISTEMA DE CONFIRMACIÓN PARA ELIMINAR ---
+        elif data.startswith("req_del_"):
+            msg_id = int(data.replace("req_del_", ""))
+            botones_confirmacion = [
+                [
+                    Button.inline("⚠️ Sí, eliminar", data=f"del_{msg_id}".encode()),
+                    Button.inline("❌ Cancelar", data=f"cancel_del_{msg_id}".encode())
+                ]
+            ]
+            await event.edit(
+                text=f"⚠️ **¿Estás seguro de que deseas eliminar este archivo?** (ID: `{msg_id}`)",
+                buttons=botones_confirmacion
+            )
+
+        elif data.startswith("cancel_del_"):
+            msg_id = int(data.replace("cancel_del_", ""))
+            botones_acciones = [
+                [
+                    Button.inline("🔄 Mover", data=f"req_mover_{msg_id}".encode()),
+                    Button.inline("🗑️ Eliminar", data=f"req_del_{msg_id}".encode())
+                ]
+            ]
+            await event.edit(
+                text=f"🛠️ Opciones para el archivo (ID: `{msg_id}`):",
+                buttons=botones_acciones
+            )
+
         elif data.startswith("del_"):
             msg_id = int(data.replace("del_", ""))
             try:
@@ -471,6 +498,7 @@ async def main():
                 await event.edit(text="🗑️ *[Archivo eliminado]*", buttons=None)
             except Exception as e:
                 await event.answer(f"❌ Error al eliminar: {str(e)}", alert=True)
+        # ---------------------------------------------
 
         # --- SUBMENÚ INTERACTIVO PARA MOVER UN SOLO ARCHIVO ---
         elif data.startswith("req_mover_"):
@@ -552,7 +580,6 @@ async def main():
             message = await user.get_messages(CHANNEL_ID, ids=msg_id)
             if message:
                 texto_actual = message.text or ""
-                # Si ya tiene hashtags, añadimos el nuevo o reemplazamos
                 if f"#{destino}" not in texto_actual.lower():
                     nuevo_texto = f"{texto_actual}\n#{destino}".strip()
                 else:
