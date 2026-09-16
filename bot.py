@@ -231,8 +231,12 @@ async def main():
             buttons=botones
         )
 
-    @bot.on(events.NewMessage)
+    # Solo escuchar mensajes privados dirigidos al bot (evita bucles con el canal)
+    @bot.on(events.NewMessage(func=lambda e: e.is_private))
     async def bot_handler(event):
+        if not event.is_private:
+            return
+
         texto = event.raw_text.strip()
         texto_lower = texto.lower()
         chat_id = event.chat_id
@@ -1111,27 +1115,25 @@ async def main():
                 await event.delete()
                 await mostrar_archivo_para_mover(chat_id)
 
-    # CORRECCIÓN DEFINITIVA DEL BUCLE:
-    # Este filtro restringe que auto_update_index SOLAMENTE escuche mensajes nuevos 
-    # que se publiquen de forma nativa en el canal. Descarta de inmediato cualquier 
-    # reenvío, edición o mensaje que no provenga directamente del canal indexado.
+    # Auto-actualización al subir multimedia al canal:
     @user.on(events.NewMessage(chats=CHANNEL_ID))
     async def auto_update_index(event):
-        # 1. Si el mensaje es un reenvío (forward), lo ignoramos para que no indexe duplicados al navegar/mover.
-        if event.message.forward:
+        msg = event.message
+        if not (msg.photo or msg.video or msg.document):
             return
-        
-        # 2. Si tiene fecha de edición, lo descartamos.
-        if getattr(event.message, 'edit_date', None) is not None:
+
+        # Si el mensaje es un reenvío interno o ya editado, ignoramos
+        if getattr(msg, 'edit_date', None) is not None:
             return
-            
-        cats = extraer_categorias(event.message)
+
+        cats = extraer_categorias(msg)
+        indice = cargar_indice()
         if cats:
-            indice = cargar_indice()
-            cats_unicas = set(cats)
-            for cat in cats_unicas:
+            for cat in set(cats):
                 indice[cat] = indice.get(cat, 0) + 1
-            guardar_indice(indice)
+        else:
+            indice['sin_nombre'] = indice.get('sin_nombre', 0) + 1
+        guardar_indice(indice)
 
     await asyncio.gather(
         bot.run_until_disconnected(),
