@@ -62,43 +62,28 @@ def extraer_categorias(message):
 
     categorias = set()
 
+    # 1. Si el mensaje trae texto / pie de foto (caption)
     if message.text:
         hashtags = re.findall(r'#(\w+)', message.text)
-        for tag in hashtags:
-            categorias.add(tag.lower())
+        if hashtags:
+            for tag in hashtags:
+                categorias.add(tag.lower())
+        else:
+            # Usa todo el texto/caption tal cual escribiste (sin separar palabras)
+            categorias.add(message.text.strip().lower())
 
-    texto_base = ""
-    if message.file and message.file.name:
-        texto_base = message.file.name.lower()
-    elif message.text:
-        texto_base = message.text.lower()
+    # 2. Si se envió como archivo / documento con nombre original
+    elif message.file and message.file.name:
+        # Extraer el nombre completo quitando la extensión (.jpg, .png, etc.)
+        nombre_completo, _ = os.path.splitext(message.file.name)
+        nombre_limpio = nombre_completo.strip().lower()
 
-    if texto_base:
-        palabras = re.findall(r'[a-z]+', texto_base)
-        ignoradas = {
-            'jpg', 'png', 'gif', 'mp4', 'mov', 'jpeg', 'heic', 'avi', 'mkv', 'mp',
-            'webp', 'mp3', 'ogg', 'opus', 'pdf', 'doc', 'docx',
-            'the', 'for', 'with', 'con', 'los', 'las', 'una', 'uno', 'que',
-            'del', 'por', 'para', 'and', 'set', 'new', 'tmp', 'temp',
-            'file', 'part', 'clip', 'hd', 'sd', 'mix', 'vol', 'ver',
-            'pre', 'old', 'cut', 'raw', 'web', 'cam', 'vip'
-        }
-
-        for p in palabras:
-            if p in ignoradas or len(p) < 3:
-                continue
-            if p in ['img', 'image', 'foto']:
-                categorias.add('img')
-            elif p in ['vid', 'video']:
-                categorias.add('vid')
-            elif p == 'whatsapp':
-                categorias.add('whatsapp')
-            elif p == 'screenshot':
-                categorias.add('screenshot')
-            elif p == 'gif':
-                categorias.add('gif')
-            else:
-                categorias.add(p)
+        # Omitir nombres genéricos de cámara o capturas para no crear carpetas basura
+        es_generico = re.match(r'^(img|image|photo|vid|video|whatsapp|screenshot)[\d_\-]*$', nombre_limpio)
+        
+        if nombre_limpio and not es_generico:
+            # Guarda el nombre exacto completo (ej: demirose_feed_20230227141715)
+            categorias.add(nombre_limpio)
 
     return list(categorias)
 
