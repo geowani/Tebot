@@ -114,6 +114,7 @@ async def main():
     await bot.start(bot_token=BOT_TOKEN)
     await user.start()
 
+    # Obtenemos tu usuario personal para mandarte las notificaciones
     me_user = await user.get_me()
     USER_ID = me_user.id
 
@@ -230,7 +231,7 @@ async def main():
             buttons=botones
         )
 
-    # Solo responder en chat privado
+    # Solo responder en chat privado con el bot
     @bot.on(events.NewMessage(func=lambda e: e.is_private))
     async def bot_handler(event):
         if not event.is_private:
@@ -441,7 +442,6 @@ async def main():
                 await status.edit(f"❌ No se encontraron archivos para `#{origen}`.")
                 return
 
-            # Ordenar más recientes primero
             ids.sort(reverse=True)
 
             user_searches[event.chat_id] = {
@@ -497,7 +497,6 @@ async def main():
             await status_msg.edit(f"No se encontraron archivos para '{query}'.", buttons=botones_vacio)
             return
 
-        # Ordenar más recientes primero
         all_ids.sort(reverse=True)
         photos.sort(reverse=True)
         videos.sort(reverse=True)
@@ -836,7 +835,6 @@ async def main():
                                 gifs.append(message.id)
                 display_query = query
 
-            # Ordenar más recientes primero (IDs más altos al principio)
             all_ids.sort(reverse=True)
             photos.sort(reverse=True)
             videos.sort(reverse=True)
@@ -1129,7 +1127,7 @@ async def main():
                 await event.delete()
                 await mostrar_archivo_para_mover(chat_id)
 
-    # Auto-actualización al subir multimedia al canal:
+    # AUTO-ACTUALIZACIÓN CON NOTIFICACIÓN PRIVADA
     @user.on(events.NewMessage(chats=CHANNEL_ID))
     async def auto_update_index(event):
         msg = event.message
@@ -1141,14 +1139,39 @@ async def main():
 
         cats = extraer_categorias(msg)
         indice = cargar_indice()
+        
         if cats:
             for cat in set(cats):
                 indice[cat] = indice.get(cat, 0) + 1
-                print(f"📥 [Auto-Index] Archivo asignado a categoría: #{cat}")
+            guardar_indice(indice)
+
+            try:
+                categorias_str = ", ".join([f"`#{c}`" for c in set(cats)])
+                await bot.send_message(
+                    USER_ID, 
+                    f"📥 **¡Nuevo archivo indexado!**\n"
+                    f"📁 Carpeta: {categorias_str}\n"
+                    f"🆔 ID: `{msg.id}`"
+                )
+            except Exception as e:
+                logger.error(f"Error enviando aviso privado: {e}")
         else:
             indice['sin_nombre'] = indice.get('sin_nombre', 0) + 1
-            print("📥 [Auto-Index] Archivo sin nombre -> Asignado a 'sin_nombre'")
-        guardar_indice(indice)
+            guardar_indice(indice)
+
+            try:
+                boton_mover = [
+                    [Button.inline("🔄 Asignar carpeta ahora", data=f"req_mover_{msg.id}".encode())]
+                ]
+                await bot.send_message(
+                    USER_ID, 
+                    f"📥 **Nuevo archivo subido al canal**\n"
+                    f"⚠️ No tiene etiqueta ni nombre reconocible.\n"
+                    f"📂 Guardado provisionalmente en **Sin nombre** (ID: `{msg.id}`).",
+                    buttons=boton_mover
+                )
+            except Exception as e:
+                logger.error(f"Error enviando aviso de sin_nombre: {e}")
 
     await asyncio.gather(
         bot.run_until_disconnected(),
