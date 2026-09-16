@@ -114,7 +114,6 @@ async def main():
     await bot.start(bot_token=BOT_TOKEN)
     await user.start()
 
-    # Obtenemos el ID numérico del usuario de la sesión para aislar eventos propios
     me_user = await user.get_me()
     USER_ID = me_user.id
 
@@ -193,7 +192,7 @@ async def main():
         fila_nav.append(Button.inline("⬅️ Volver", data=f"volver_{origen}".encode()))
         botones.append(fila_nav)
 
-        msg_text = f"📄 Mostrando {start+1} a {min(end, len(current_list))} de **{len(current_list)}** en '{query}'."
+        msg_text = f"📄 Mostrando {start+1} a {min(end, len(current_list))} de **{len(current_list)}** en '{query}' (más recientes primero)."
         if selected_ids:
             msg_text += f"\n📌 Archivos seleccionados en total: **{len(selected_ids)}**"
         if end >= len(current_list):
@@ -231,7 +230,7 @@ async def main():
             buttons=botones
         )
 
-    # Solo escuchar mensajes privados dirigidos al bot (evita bucles con el canal)
+    # Solo responder en chat privado
     @bot.on(events.NewMessage(func=lambda e: e.is_private))
     async def bot_handler(event):
         if not event.is_private:
@@ -442,6 +441,9 @@ async def main():
                 await status.edit(f"❌ No se encontraron archivos para `#{origen}`.")
                 return
 
+            # Ordenar más recientes primero
+            ids.sort(reverse=True)
+
             user_searches[event.chat_id] = {
                 "mover_ids": ids,
                 "mover_index": 0,
@@ -494,6 +496,12 @@ async def main():
 
             await status_msg.edit(f"No se encontraron archivos para '{query}'.", buttons=botones_vacio)
             return
+
+        # Ordenar más recientes primero
+        all_ids.sort(reverse=True)
+        photos.sort(reverse=True)
+        videos.sort(reverse=True)
+        gifs.sort(reverse=True)
 
         user_searches[event.chat_id] = {
             "all_ids": all_ids,
@@ -828,6 +836,12 @@ async def main():
                                 gifs.append(message.id)
                 display_query = query
 
+            # Ordenar más recientes primero (IDs más altos al principio)
+            all_ids.sort(reverse=True)
+            photos.sort(reverse=True)
+            videos.sort(reverse=True)
+            gifs.sort(reverse=True)
+
             user_searches[chat_id] = {
                 "all_ids": all_ids, "photos": photos, "videos": videos, "gifs": gifs,
                 "page": 0, "filter": "all", "query": display_query, "origen": "menu",
@@ -1122,7 +1136,6 @@ async def main():
         if not (msg.photo or msg.video or msg.document):
             return
 
-        # Si el mensaje es un reenvío interno o ya editado, ignoramos
         if getattr(msg, 'edit_date', None) is not None:
             return
 
@@ -1131,8 +1144,10 @@ async def main():
         if cats:
             for cat in set(cats):
                 indice[cat] = indice.get(cat, 0) + 1
+                print(f"📥 [Auto-Index] Archivo asignado a categoría: #{cat}")
         else:
             indice['sin_nombre'] = indice.get('sin_nombre', 0) + 1
+            print("📥 [Auto-Index] Archivo sin nombre -> Asignado a 'sin_nombre'")
         guardar_indice(indice)
 
     await asyncio.gather(
